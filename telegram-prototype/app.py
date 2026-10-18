@@ -4,6 +4,7 @@ Uses synthetic data only. Secrets are read from environment variables.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sqlite3
 from contextlib import closing
@@ -283,7 +284,7 @@ async def owner_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await query.message.reply_text(f"Тестовая заявка №{request_id}: статус «{status}».")
 
 
-def main() -> None:
+def build_apps() -> tuple[Application, Application]:
     customer_token = os.getenv("CUSTOMER_BOT_TOKEN", "")
     owner_token = os.getenv("OWNER_BOT_TOKEN", "")
     owner_id = os.getenv("OWNER_TELEGRAM_ID", "")
@@ -317,10 +318,33 @@ def main() -> None:
     owner.add_handler(CommandHandler("start", owner_start))
     owner.add_handler(CommandHandler("requests", owner_requests))
     owner.add_handler(CallbackQueryHandler(owner_status, pattern=r"^status:"))
+    return customer, owner
 
-    print("Starting local demo bots. Stop with Ctrl+C.")
-    customer.run_polling(drop_pending_updates=True, close_loop=False)
-    owner.run_polling(drop_pending_updates=True)
+
+async def run_bots() -> None:
+    customer, owner = build_apps()
+    apps = (customer, owner)
+    try:
+        for app in apps:
+            await app.initialize()
+        for app in apps:
+            await app.start()
+        for app in apps:
+            await app.updater.start_polling(drop_pending_updates=True)
+        print("Both local demo bots are running. Stop with Ctrl+C.")
+        await asyncio.Event().wait()
+    finally:
+        for app in apps:
+            if app.updater and app.updater.running:
+                await app.updater.stop()
+        for app in apps:
+            if app.running:
+                await app.stop()
+            await app.shutdown()
+
+
+def main() -> None:
+    asyncio.run(run_bots())
 
 
 if __name__ == "__main__":
