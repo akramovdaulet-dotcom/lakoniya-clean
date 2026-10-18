@@ -2,7 +2,9 @@ import hashlib
 import hmac
 import json
 import os
+import sys
 import time
+from pathlib import Path
 from urllib.parse import urlencode
 
 # Use isolated test configuration; never read real production secrets in tests.
@@ -12,6 +14,9 @@ os.environ["DATABASE_PATH"] = "/tmp/lakoniya-test.sqlite3"
 os.environ["ALLOWED_ORIGINS"] = "https://lakoniya-miniapp-test.pages.dev"
 
 from fastapi.testclient import TestClient
+
+# Ensure backend/app.py is importable when pytest is launched from the repository root.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app as api
 
 
