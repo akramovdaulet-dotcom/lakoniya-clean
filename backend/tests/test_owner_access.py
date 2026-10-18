@@ -132,3 +132,35 @@ def test_owner_bot_signature_cannot_create_customer_request():
         headers={"X-Telegram-Init-Data": signed_init_data(123456789)},
     )
     assert response.status_code == 401
+
+
+
+def test_manager_can_update_request_status_created_by_customer():
+    create_response = client.post(
+        "/api/requests",
+        json={
+            "service": "Тестовая уборка",
+            "address": "Тестовый адрес, 2",
+            "preferred_time": "2099-01-02",
+            "customer_contact": "Тестовый клиент · +70000000001",
+            "notes": "Автоматический тест; не реальные данные",
+        },
+        headers={
+            "X-Telegram-Init-Data": signed_init_data(
+                123456789,
+                bot_token=os.environ["CUSTOMER_BOT_TOKEN"],
+            )
+        },
+    )
+    assert create_response.status_code == 201
+    request_id = create_response.json()["id"]
+
+    update_response = client.patch(
+        f"/api/requests/{request_id}/status",
+        json={"status": "В работе"},
+        headers={
+            "X-Telegram-Init-Data": signed_init_data(1086767973),
+        },
+    )
+    assert update_response.status_code == 200
+    assert update_response.json() == {"id": request_id, "status": "В работе"}
