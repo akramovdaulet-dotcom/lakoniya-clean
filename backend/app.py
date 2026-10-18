@@ -11,7 +11,10 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+# Owner and customer Mini Apps belong to different Telegram bots and must use
+# separate tokens. TELEGRAM_BOT_TOKEN remains a backwards-compatible owner token.
+OWNER_BOT_TOKEN = os.environ.get("OWNER_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+CUSTOMER_BOT_TOKEN = os.environ.get("CUSTOMER_BOT_TOKEN", "")
 OWNER_IDS = {
     int(value.strip())
     for value in os.environ.get("OWNER_TELEGRAM_IDS", "").split(",")
@@ -28,7 +31,7 @@ ALLOWED_ORIGINS = [
 INIT_DATA_MAX_AGE_SECONDS = 3600
 ALLOWED_STATUSES = {"Новая", "Подтверждена", "В работе", "Завершена", "Отменена"}
 
-app = FastAPI(title="Lakoniya Clean API", version="0.1.0")
+app = FastAPI(title="Lakoniya Clean API", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -67,9 +70,9 @@ def initialize_db():
 initialize_db()
 
 
-def verify_telegram_init_data(init_data: str) -> dict:
-    if not BOT_TOKEN:
-        raise HTTPException(status_code=503, detail="Backend is not configured")
+def verify_telegram_init_data(init_data: str, bot_token: str) -> dict:
+    if not bot_token:
+        raise HTTPException(status_code=503, detail="This Telegram Mini App is not configured")
     if not init_data or len(init_data) > 8192:
         raise HTTPException(status_code=401, detail="Missing or invalid Telegram auth data")
 
@@ -92,7 +95,7 @@ def verify_telegram_init_data(init_data: str) -> dict:
     )
     # Telegram Web Apps: secret_key = HMAC_SHA256(key=bot_token, msg="WebAppData")
     secret_key = hmac.new(
-        BOT_TOKEN.encode("utf-8"), b"WebAppData", hashlib.sha256
+        bot_token.encode("utf-8"), b"WebAppData", hashlib.sha256
     ).digest()
     expected_hash = hmac.new(
         secret_key, data_check_string.encode("utf-8"), hashlib.sha256
@@ -111,7 +114,11 @@ def verify_telegram_init_data(init_data: str) -> dict:
 
 
 def authenticated_user(x_telegram_init_data: str = Header(default="")) -> dict:
-    return verify_telegram_init_data(x_telegram_init_data)
+    return verify_telegram_init_data(x_telegram_init_data, OWNER_BOT_TOKEN)
+
+
+def customer_user(x_telegram_init_data: str = Header(default="")) -> dict:
+    return verify_telegram_init_data(x_telegram_init_data, CUSTOMER_BOT_TOKEN)
 
 
 def owner_user(user: dict = Depends(authenticated_user)) -> dict:
@@ -134,12 +141,16 @@ class StatusUpdate(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "configured": bool(BOT_TOKEN and OWNER_IDS)}
+    return {
+        "ok": True,
+        "configured": bool(OWNER_BOT_TOKEN and OWNER_IDS),
+        "customer_app_configured": bool(CUSTOMER_BOT_TOKEN),
+    }
 
 
 @app.post("/api/requests", status_code=201)
-def create_request(payload: RequestCreate, user: dict = Depends(authenticated_user)):
-    # Customer Mini App must send valid Telegram initData. No bot token is sent to clients.
+def create_request(payload: RequestCreate, user: dict = Depends(customer_user)):
+    # Customer Mini App must send initData signed by the customer bot's token.
     with connect_db() as db:
         cursor = db.execute(
             """INSERT INTO requests
