@@ -44,6 +44,47 @@ def signed_init_data(
 client = TestClient(api.app)
 
 
+def test_synthetic_test_request_is_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("ENABLE_SYNTHETIC_TEST_REQUESTS", raising=False)
+    response = client.post(
+        "/api/test-requests",
+        headers={
+            "X-Telegram-Init-Data": signed_init_data(
+                123456789, bot_token=os.environ["CUSTOMER_BOT_TOKEN"]
+            )
+        },
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Synthetic test requests are disabled"
+
+
+def test_synthetic_test_request_stores_only_fixed_test_data(monkeypatch):
+    monkeypatch.setenv("ENABLE_SYNTHETIC_TEST_REQUESTS", "true")
+    response = client.post(
+        "/api/test-requests",
+        json={
+            "address": "REAL ADDRESS MUST BE IGNORED",
+            "customer_contact": "REAL PHONE MUST BE IGNORED",
+        },
+        headers={
+            "X-Telegram-Init-Data": signed_init_data(
+                123456789, bot_token=os.environ["CUSTOMER_BOT_TOKEN"]
+            )
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["synthetic"] is True
+    request_id = response.json()["id"]
+    with api.connect_db() as db:
+        row = db.execute(
+            "SELECT address, customer_contact, notes FROM requests WHERE id = ?",
+            (request_id,),
+        ).fetchone()
+    assert row["address"] == "ТЕСТОВЫЙ АДРЕС — не использовать"
+    assert row["customer_contact"] == "ТЕСТОВЫЙ КОНТАКТ — не использовать"
+    assert "SYNTHETIC_TEST_REQUEST" in row["notes"]
+
+
 def test_configured_health_does_not_expose_secrets():
     response = client.get("/health")
     assert response.status_code == 200
