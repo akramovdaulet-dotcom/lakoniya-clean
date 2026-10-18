@@ -237,7 +237,8 @@ def update_request_status(
     if payload.status not in ALLOWED_STATUSES:
         raise HTTPException(status_code=422, detail="Unsupported status")
     with connect_db() as db:
-        cursor = db.execute(
+        cursor = execute_db(
+            db,
             "UPDATE requests SET status = ? WHERE id = ?",
             (payload.status, request_id),
         )
