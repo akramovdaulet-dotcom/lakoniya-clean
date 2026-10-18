@@ -90,8 +90,9 @@ def verify_telegram_init_data(init_data: str) -> dict:
     data_check_string = "\n".join(
         f"{key}={value}" for key, value in sorted(parsed.items())
     )
+    # Telegram Web Apps: secret_key = HMAC_SHA256(key=bot_token, msg="WebAppData")
     secret_key = hmac.new(
-        b"WebAppData", BOT_TOKEN.encode("utf-8"), hashlib.sha256
+        BOT_TOKEN.encode("utf-8"), b"WebAppData", hashlib.sha256
     ).digest()
     expected_hash = hmac.new(
         secret_key, data_check_string.encode("utf-8"), hashlib.sha256
@@ -138,7 +139,7 @@ def health():
 
 @app.post("/api/requests", status_code=201)
 def create_request(payload: RequestCreate, user: dict = Depends(authenticated_user)):
-    # The customer Mini App must send valid Telegram initData. No bot token is sent to clients.
+    # Customer Mini App must send valid Telegram initData. No bot token is sent to clients.
     with connect_db() as db:
         cursor = db.execute(
             """INSERT INTO requests
