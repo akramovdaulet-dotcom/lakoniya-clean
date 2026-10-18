@@ -43,7 +43,7 @@ client = TestClient(api.app)
 def test_configured_health_does_not_expose_secrets():
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "configured": True}
+    assert response.json() == {"ok": True, "configured": True, "customer_app_configured": False}
 
 
 def test_primary_owner_can_list_requests():
