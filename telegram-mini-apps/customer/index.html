@@ -11,8 +11,8 @@
 <body>
 <header><div class="brand">ЛАКОНИЯ КЛИН · УФА</div><h1>Чистота начинается здесь.</h1><p>Выберите уборку — мы подготовим заявку для подтверждения владельцем.</p></header>
 <section id="form" class="card">
-<span class="tag">Подключение тестируется</span>
-<p class="notice">Пока не вводите реальные контактные данные: постоянное хранение заявок ещё не подтверждено.</p>
+<span class="tag">Только тестовые данные</span>
+<p class="notice">Это безопасный тест: сервер сохранит только фиксированные вымышленные данные. Поля ниже не попадут в тестовую заявку.</p>
 <label class="label" for="service">Что нужно убрать?</label><select id="service"><option value="support">Поддерживающая уборка</option><option value="deep">Генеральная уборка</option><option value="repair">После ремонта</option></select>
 <label class="label" for="area">Площадь, м²</label><input id="area" type="number" min="10" max="500" value="45" required>
 <label class="label" for="district">Район Уфы</label><select id="district"><option>Дёмский</option><option>Калининский</option><option>Кировский</option><option>Ленинский</option><option>Октябрьский</option><option>Орджоникидзевский</option><option>Советский</option></select>
@@ -29,8 +29,6 @@
 <section id="done" class="card success hidden"><div class="emoji">🧽</div><h2>Заявка принята</h2><p id="result"></p><button id="back">Вернуться к форме</button></section>
 <script>
 const API_BASE='https://lakoniya-clean.onrender.com';
-// Keep live submissions disabled until persistent Render storage is verified.
-const LIVE_SUBMISSIONS_ENABLED=false;
 const tg=window.Telegram?.WebApp;try{tg?.ready();tg?.expand()}catch(e){}
 const rates={support:180,deep:320,repair:400};
 const labels={support:'Поддерживающая уборка',deep:'Генеральная уборка',repair:'Уборка после ремонта'};
@@ -41,17 +39,16 @@ $('#submit').onclick=async()=>{
   $('#error').classList.add('hidden');
   if(!$('#consent').checked){$('#error').textContent='Отметьте согласие на обработку данных.';$('#error').classList.remove('hidden');return}
   if(!$('#address').value.trim()||!$('#date').value||!$('#name').value.trim()||!$('#phone').value.trim()){ $('#error').textContent='Заполните адрес, дату, имя и телефон.';$('#error').classList.remove('hidden');return}
-  if(!LIVE_SUBMISSIONS_ENABLED){$('#error').textContent='Отправка временно отключена до проверки постоянного хранения данных и настроек клиентского бота. Форма пока не отправила и не сохранила заявку.';$('#error').classList.remove('hidden');return}
-  if(!tg?.initData){$('#error').textContent='Откройте форму через Telegram-бота, чтобы подтвердить отправку.';$('#error').classList.remove('hidden');return}
-  const button=$('#submit');button.disabled=true;button.textContent='Отправляем…';
-  const payload={service:labels[$('#service').value],address:$('#address').value.trim(),preferred_time:$('#date').value,customer_contact:$('#name').value.trim()+' · '+$('#phone').value.trim(),notes:'Район: '+$('#district').value+'; площадь: '+$('#area').value+' м²; ориентировочная оценка: '+$('#price').textContent};
+  if(!tg?.initData){$('#error').textContent='Откройте форму через Telegram-бота, чтобы подтвердить тестовую отправку.';$('#error').classList.remove('hidden');return}
+  const button=$('#submit');button.disabled=true;button.textContent='Создаём тест…';
   try{
-    const response=await fetch(API_BASE+'/api/requests',{method:'POST',headers:{'Content-Type':'application/json','X-Telegram-Init-Data':tg.initData},body:JSON.stringify(payload)});
+    // The API ignores all form values and stores only fixed synthetic test data.
+    const response=await fetch(API_BASE+'/api/test-requests',{method:'POST',headers:{'Content-Type':'application/json','X-Telegram-Init-Data':tg.initData},body:'{}'});
     const data=await response.json().catch(()=>({}));
     if(!response.ok)throw new Error(data.detail||('Ошибка сервера: '+response.status));
-    $('#result').textContent='Номер заявки: '+data.id+'. Владелец должен подтвердить дату и стоимость.';
+    $('#result').textContent='Тестовая заявка №'+data.id+' создана. В панели владельца она помечена как тестовая.';
     $('#form').classList.add('hidden');$('#done').classList.remove('hidden');
-  }catch(error){$('#error').textContent='Не удалось отправить заявку: '+error.message;$('#error').classList.remove('hidden')}
+  }catch(error){$('#error').textContent='Не удалось создать тестовую заявку: '+error.message;$('#error').classList.remove('hidden')}
   finally{button.disabled=false;button.textContent='Отправить тестовую заявку'}
 };
 $('#back').onclick=()=>{$('#done').classList.add('hidden');$('#form').classList.remove('hidden')};
