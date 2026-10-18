@@ -169,6 +169,29 @@ def create_request(payload: RequestCreate, user: dict = Depends(customer_user)):
     return {"id": request_id, "status": "Новая"}
 
 
+@app.post("/api/test-requests", status_code=201)
+def create_synthetic_test_request(user: dict = Depends(customer_user)):
+    """Create a fixed synthetic request for end-to-end checks; never store form data."""
+    if os.environ.get("ENABLE_SYNTHETIC_TEST_REQUESTS", "").lower() != "true":
+        raise HTTPException(status_code=503, detail="Synthetic test requests are disabled")
+    with connect_db() as db:
+        cursor = db.execute(
+            """INSERT INTO requests
+               (service, address, preferred_time, customer_contact, notes, status, created_at)
+               VALUES (?, ?, ?, ?, ?, 'Новая', ?)""",
+            (
+                "ТЕСТ — поддерживающая уборка",
+                "ТЕСТОВЫЙ АДРЕС — не использовать",
+                "2099-01-01",
+                "ТЕСТОВЫЙ КОНТАКТ — не использовать",
+                "SYNTHETIC_TEST_REQUEST; создано тестовым endpoint; реальные данные не передавались",
+                int(time.time()),
+            ),
+        )
+        request_id = cursor.lastrowid
+    return {"id": request_id, "status": "Новая", "synthetic": True}
+
+
 @app.get("/api/requests")
 def list_requests(_: dict = Depends(owner_user)):
     with connect_db() as db:
