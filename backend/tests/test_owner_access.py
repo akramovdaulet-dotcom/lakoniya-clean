@@ -92,6 +92,7 @@ def test_configured_health_does_not_expose_secrets():
         "ok": True,
         "configured": True,
         "customer_app_configured": True,
+        "database_backend": "sqlite",
     }
 
 
