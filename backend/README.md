@@ -18,7 +18,14 @@ FastAPI backend for the Telegram customer Mini App and owner panel. It is still 
 - `CUSTOMER_BOT_TOKEN`: separate token for the customer bot; required for customer submissions.
 - `OWNER_TELEGRAM_IDS`: comma-separated numeric Telegram IDs with equal access to implemented owner endpoints.
 - `ALLOWED_ORIGINS`: comma-separated exact HTTPS origins allowed to call the API.
-- `DATABASE_PATH`: path to the SQLite database on persistent storage.
+- `DATABASE_URL`: optional managed PostgreSQL connection URL; when set, PostgreSQL is used instead of SQLite. Keep the URL secret.
+- `DATABASE_PATH`: local SQLite path used only when `DATABASE_URL` is unset.
+- `ENABLE_SYNTHETIC_TEST_REQUESTS`: temporary test-only switch; defaults to disabled.
+
+## Database notes
+
+- PostgreSQL is selected when `DATABASE_URL` is set; SQLite remains the local/test default.
+- Render Free Postgres is suitable only for temporary testing: it expires after 30 days and does not include backups. Back up/export data and upgrade or migrate before expiry; do not use it as the sole production store.
 
 ## Tests
 

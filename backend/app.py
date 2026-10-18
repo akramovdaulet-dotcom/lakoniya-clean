@@ -20,7 +20,9 @@ OWNER_IDS = {
     for value in os.environ.get("OWNER_TELEGRAM_IDS", "").split(",")
     if value.strip().isdigit()
 }
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 DATABASE_PATH = os.environ.get("DATABASE_PATH", "./data/lakoniya.sqlite3")
+USE_POSTGRES = bool(DATABASE_URL)
 ALLOWED_ORIGINS = [
     value.strip()
     for value in os.environ.get(
@@ -42,6 +44,13 @@ app.add_middleware(
 
 
 def connect_db():
+    if USE_POSTGRES:
+        import psycopg
+        from psycopg.rows import dict_row
+        url = DATABASE_URL
+        if url.startswith("postgres://"):
+            url = "postgresql://" + url[len("postgres://"):]
+        return psycopg.connect(url, row_factory=dict_row)
     path = Path(DATABASE_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
@@ -49,19 +58,31 @@ def connect_db():
     return connection
 
 
+def execute_db(db, sql, params=(), *, returning_id=False):
+    if USE_POSTGRES:
+        sql = sql.replace("?", "%s")
+        if returning_id:
+            sql += " RETURNING id"
+        cursor = db.execute(sql, params)
+        return cursor.fetchone()["id"] if returning_id else cursor
+    cursor = db.execute(sql, params)
+    return cursor.lastrowid if returning_id else cursor
+
+
 def initialize_db():
+    id_column = "BIGSERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
     with connect_db() as db:
         db.execute(
-            """
+            f"""
             CREATE TABLE IF NOT EXISTS requests (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {id_column},
                 service TEXT NOT NULL,
                 address TEXT NOT NULL,
                 preferred_time TEXT NOT NULL,
                 customer_contact TEXT NOT NULL,
                 notes TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'Новая',
-                created_at INTEGER NOT NULL
+                created_at BIGINT NOT NULL
             )
             """
         )
@@ -145,6 +166,7 @@ def health():
         "ok": True,
         "configured": bool(OWNER_BOT_TOKEN and OWNER_IDS),
         "customer_app_configured": bool(CUSTOMER_BOT_TOKEN),
+        "database_backend": "postgres" if USE_POSTGRES else "sqlite",
     }
 
 
@@ -152,7 +174,8 @@ def health():
 def create_request(payload: RequestCreate, user: dict = Depends(customer_user)):
     # Customer Mini App must send initData signed by the customer bot's token.
     with connect_db() as db:
-        cursor = db.execute(
+        request_id = execute_db(
+            db,
             """INSERT INTO requests
                (service, address, preferred_time, customer_contact, notes, status, created_at)
                VALUES (?, ?, ?, ?, ?, 'Новая', ?)""",
@@ -164,8 +187,8 @@ def create_request(payload: RequestCreate, user: dict = Depends(customer_user)):
                 payload.notes,
                 int(time.time()),
             ),
+            returning_id=True,
         )
-        request_id = cursor.lastrowid
     return {"id": request_id, "status": "Новая"}
 
 
@@ -175,7 +198,8 @@ def create_synthetic_test_request(user: dict = Depends(customer_user)):
     if os.environ.get("ENABLE_SYNTHETIC_TEST_REQUESTS", "").lower() != "true":
         raise HTTPException(status_code=503, detail="Synthetic test requests are disabled")
     with connect_db() as db:
-        cursor = db.execute(
+        request_id = execute_db(
+            db,
             """INSERT INTO requests
                (service, address, preferred_time, customer_contact, notes, status, created_at)
                VALUES (?, ?, ?, ?, ?, 'Новая', ?)""",
@@ -187,15 +211,16 @@ def create_synthetic_test_request(user: dict = Depends(customer_user)):
                 "SYNTHETIC_TEST_REQUEST; создано тестовым endpoint; реальные данные не передавались",
                 int(time.time()),
             ),
+            returning_id=True,
         )
-        request_id = cursor.lastrowid
     return {"id": request_id, "status": "Новая", "synthetic": True}
 
 
 @app.get("/api/requests")
 def list_requests(_: dict = Depends(owner_user)):
     with connect_db() as db:
-        rows = db.execute(
+        rows = execute_db(
+            db,
             """SELECT id, service, address, preferred_time, customer_contact,
                       notes, status, created_at
                FROM requests ORDER BY created_at DESC LIMIT 500"""
@@ -212,7 +237,8 @@ def update_request_status(
     if payload.status not in ALLOWED_STATUSES:
         raise HTTPException(status_code=422, detail="Unsupported status")
     with connect_db() as db:
-        cursor = db.execute(
+        cursor = execute_db(
+            db,
             "UPDATE requests SET status = ? WHERE id = ?",
             (payload.status, request_id),
         )
