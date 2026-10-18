@@ -90,7 +90,7 @@ def verify_telegram_init_data(init_data: str, bot_token: str) -> dict:
     if auth_date > now + 30 or now - auth_date > INIT_DATA_MAX_AGE_SECONDS:
         raise HTTPException(status_code=401, detail="Telegram auth data expired")
 
-    data_check_string = "\\n".join(
+    data_check_string = "\n".join(
         f"{key}={value}" for key, value in sorted(parsed.items())
     )
     # Telegram Web Apps: secret_key = HMAC_SHA256(key=bot_token, msg="WebAppData")
