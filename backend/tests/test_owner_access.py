@@ -5,11 +5,11 @@ import os
 import time
 from urllib.parse import urlencode
 
-# Configure environment before importing the application module.
-os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token-do-not-use-in-production")
-os.environ.setdefault("OWNER_TELEGRAM_IDS", "111111,1086767973")
-os.environ.setdefault("DATABASE_PATH", "/tmp/lakoniya-test.sqlite3")
-os.environ.setdefault("ALLOWED_ORIGINS", "https://lakoniya-miniapp-test.pages.dev")
+# Use isolated test configuration; never read real production secrets in tests.
+os.environ["TELEGRAM_BOT_TOKEN"] = "test-token-do-not-use-in-production"
+os.environ["OWNER_TELEGRAM_IDS"] = "547686782,1086767973"
+os.environ["DATABASE_PATH"] = "/tmp/lakoniya-test.sqlite3"
+os.environ["ALLOWED_ORIGINS"] = "https://lakoniya-miniapp-test.pages.dev"
 
 from fastapi.testclient import TestClient
 import app as api
@@ -41,7 +41,16 @@ def test_configured_health_does_not_expose_secrets():
     assert response.json() == {"ok": True, "configured": True}
 
 
-def test_manager_id_has_same_request_access_as_owner_allowlist():
+def test_primary_owner_can_list_requests():
+    response = client.get(
+        "/api/requests",
+        headers={"X-Telegram-Init-Data": signed_init_data(547686782)},
+    )
+    assert response.status_code == 200
+    assert "requests" in response.json()
+
+
+def test_manager_has_same_request_access_as_primary_owner():
     response = client.get(
         "/api/requests",
         headers={"X-Telegram-Init-Data": signed_init_data(1086767973)},
