@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f5f7fb"><title>Лакония Клин — панель владельца</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--tg-theme-text-color,#172033);background:var(--tg-theme-bg-color,#f5f7fb);--card:var(--tg-theme-secondary-bg-color,#fff);--muted:var(--tg-theme-hint-color,#778197);--accent:var(--tg-theme-button-color,#2878e8)}*{box-sizing:border-box}body{margin:0;padding:18px 15px 32px;max-width:720px;margin-inline:auto}.top{display:flex;justify-content:space-between;align-items:center;gap:12px}.brand{font-size:12px;letter-spacing:.1em;color:var(--accent);font-weight:800}h1{font-size:27px;margin:7px 0}p{color:var(--muted);line-height:1.4;margin:6px 0}.demo{background:#fff1cf;color:#815500;padding:9px 12px;border-radius:12px;font-size:12px;font-weight:700;margin:16px 0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.card{background:var(--card);border-radius:17px;padding:15px;margin:10px 0;box-shadow:0 5px 24px #1625440a}.metric{font-size:27px;font-weight:800;margin-top:8px}.caption{font-size:12px;color:var(--muted)}.section-title{font-size:18px;margin:23px 2px 9px}.request{padding:14px}.row{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.pill{white-space:nowrap;background:#e8f4ed;color:#197548;border-radius:999px;padding:5px 8px;font-size:11px;font-weight:700}.pill.pending{background:#fff1cf;color:#815500}button{border:0;border-radius:11px;padding:10px;font:inherit;font-weight:700;background:var(--accent);color:var(--tg-theme-button-text-color,#fff)}.actions{display:flex;gap:7px;margin-top:12px}.actions button{flex:1;font-size:12px}.secondary{background:transparent;color:var(--accent);border:1px solid #cddcf7}.agent{display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid #e7eaf0}.agent:last-child{border:0}.dot{width:9px;height:9px;border-radius:50%;background:#d89b22;flex-shrink:0}.small{font-size:12px}.footer{font-size:11px;text-align:center;margin-top:20px}
+</style></head>
+<body>
+<div class="top"><div><div class="brand">ЛАКОНИЯ КЛИН</div><h1>Панель владельца</h1><p>Рабочий центр бизнеса</p></div><div style="font-size:30px">🛡️</div></div>
+<div class="demo">ДЕМО-РЕЖИМ · ДАННЫЕ ВЫМЫШЛЕННЫЕ · АВТОРИЗАЦИЯ С СЕРВЕРОМ НЕ ПОДКЛЮЧЕНА</div>
+<div class="grid">
+<div class="card"><div class="caption">Новые заявки</div><div class="metric">3</div><p class="small">2 ожидают ответа</p></div>
+<div class="card"><div class="caption">Уборки сегодня</div><div class="metric">2</div><p class="small">Плановый график</p></div>
+<div class="card"><div class="caption">Выручка за неделю</div><div class="metric">12 500 ₽</div><p class="small">Демонстрационная сумма</p></div>
+<div class="card"><div class="caption">ИИ-агенты</div><div class="metric">5</div><p class="small">Макет будущей системы</p></div>
+</div>
+<h2 class="section-title">Заявки</h2>
+<div id="requests"></div>
+<h2 class="section-title">Контроль ИИ-агентов</h2>
+<div class="card">
+<div class="agent"><span class="dot"></span><div><b>Поиск клиентов</b><p class="small">Предлагает источники потенциальных заказов</p></div><span class="pill pending">Тест</span></div>
+<div class="agent"><span class="dot"></span><div><b>Коммуникации</b><p class="small">Готовит ответы; отправка не подключена</p></div><span class="pill pending">Тест</span></div>
+<div class="agent"><span class="dot"></span><div><b>Контроль заявок</b><p class="small">Следит за статусами в демонстрации</p></div><span class="pill pending">Тест</span></div>
+<div class="agent"><span class="dot"></span><div><b>Планирование</b><p class="small">Будет управлять расписанием</p></div><span class="pill pending">Тест</span></div>
+<div class="agent"><span class="dot"></span><div><b>Главный аудитор</b><p class="small">Проверка действий и запрос подтверждений</p></div><span class="pill pending">Тест</span></div>
+</div>
+<p class="footer">Этот интерфейс не получает реальные заявки и не управляет ботами. Подключение безопасного серверного API — следующий этап.</p>
+<script>
+const tg=window.Telegram?.WebApp;try{tg?.ready();tg?.expand()}catch(e){}
+const demo=[{id:104,name:'Тестовый клиент А',service:'Поддерживающая уборка',area:45,date:'Завтра',status:'Новая'},{id:103,name:'Тестовый клиент Б',service:'Генеральная уборка',area:72,date:'20 октября',status:'Связаться'},{id:102,name:'Тестовый клиент В',service:'После ремонта',area:38,date:'22 октября',status:'Подтверждена'}];
+const root=document.querySelector('#requests');
+function render(){root.innerHTML='';demo.forEach(r=>{const el=document.createElement('div');el.className='card request';el.innerHTML='<div class="row"><div><b>Заявка №'+r.id+'</b><p>'+r.name+' · '+r.area+' м²</p></div><span class="pill '+(r.status==='Подтверждена'?'':'pending')+'">'+r.status+'</span></div><p>'+r.service+' · '+r.date+'</p><div class="actions"><button class="secondary" data-id="'+r.id+'" data-status="Связаться">Связаться</button><button data-id="'+r.id+'" data-status="Подтверждена">Подтвердить</button></div>';root.appendChild(el)});root.querySelectorAll('button').forEach(b=>b.onclick=()=>{const r=demo.find(x=>x.id===Number(b.dataset.id));r.status=b.dataset.status;render()})}
+render();
+</script></body></html>
