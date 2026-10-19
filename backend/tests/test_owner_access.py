@@ -162,6 +162,35 @@ def test_customer_can_create_request_with_customer_bot_signature():
     assert isinstance(response.json()["id"], int)
 
 
+def test_clean_token_strips_whitespace_newlines_and_quotes():
+    assert api.clean_token("abc:123") == "abc:123"
+    assert api.clean_token("  abc:123\n") == "abc:123"
+    assert api.clean_token('"abc:123"') == "abc:123"
+    assert api.clean_token("'abc:123'\r\n") == "abc:123"
+    assert api.clean_token(' " abc:123 " ') == "abc:123"
+    assert api.clean_token("") == ""
+    assert api.clean_token(None) == ""
+
+
+def test_customer_request_works_when_env_token_had_stray_whitespace(monkeypatch):
+    real_token = os.environ["CUSTOMER_BOT_TOKEN"]
+    # Simulates a hosting env value pasted with quotes and a trailing newline.
+    monkeypatch.setattr(api, "CUSTOMER_BOT_TOKEN", api.clean_token(f'"{real_token}"\n'))
+    response = client.post(
+        "/api/requests",
+        json={
+            "service": "Тест",
+            "address": "Тестовый адрес",
+            "preferred_time": "2099-01-01",
+            "customer_contact": "Тестовый контакт",
+        },
+        headers={
+            "X-Telegram-Init-Data": signed_init_data(123456789, bot_token=real_token)
+        },
+    )
+    assert response.status_code == 201
+
+
 def test_owner_bot_signature_cannot_create_customer_request():
     response = client.post(
         "/api/requests",

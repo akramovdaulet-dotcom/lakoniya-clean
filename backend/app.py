@@ -11,10 +11,24 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+def clean_token(value: str) -> str:
+    """Strip whitespace, newlines and wrapping quotes pasted into a host's env UI.
+
+    A stray space, line break or quote changes the HMAC key and makes every
+    Telegram signature check fail even though the token itself is correct.
+    """
+    value = (value or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1].strip()
+    return value
+
+
 # Owner and customer Mini Apps belong to different Telegram bots and must use
 # separate tokens. TELEGRAM_BOT_TOKEN remains a backwards-compatible owner token.
-OWNER_BOT_TOKEN = os.environ.get("OWNER_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CUSTOMER_BOT_TOKEN = os.environ.get("CUSTOMER_BOT_TOKEN", "")
+OWNER_BOT_TOKEN = clean_token(
+    os.environ.get("OWNER_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+)
+CUSTOMER_BOT_TOKEN = clean_token(os.environ.get("CUSTOMER_BOT_TOKEN", ""))
 OWNER_IDS = {
     int(value.strip())
     for value in os.environ.get("OWNER_TELEGRAM_IDS", "").split(",")
