@@ -11,8 +11,8 @@
 <body>
 <header><div class="brand">ЛАКОНИЯ КЛИН · УФА</div><h1>Чистота начинается здесь.</h1><p>Выберите уборку — мы подготовим заявку для подтверждения владельцем.</p></header>
 <section id="form" class="card">
-<span class="tag">Только тестовые данные</span>
-<p class="notice">Это безопасный тест: сервер сохранит только фиксированные вымышленные данные. Поля ниже не попадут в тестовую заявку.</p>
+<span class="tag">Заявка на уборку</span>
+<p class="notice">Укажите данные для связи. Заявка будет сохранена в базе и передана владельцу для подтверждения.</p>
 <label class="label" for="service">Что нужно убрать?</label><select id="service"><option value="support">Поддерживающая уборка</option><option value="deep">Генеральная уборка</option><option value="repair">После ремонта</option></select>
 <label class="label" for="area">Площадь, м²</label><input id="area" type="number" min="10" max="500" value="45" required>
 <label class="label" for="district">Район Уфы</label><select id="district"><option>Дёмский</option><option>Калининский</option><option>Кировский</option><option>Ленинский</option><option>Октябрьский</option><option>Орджоникидзевский</option><option>Советский</option></select>
@@ -24,7 +24,7 @@
 <label class="label" for="phone">Телефон для связи</label><input id="phone" type="tel" placeholder="+7 ..." maxlength="20" required>
 <label class="consent"><input id="consent" type="checkbox"><span>Согласен(на) на передачу указанных данных для обработки заявки.</span></label>
 <p id="error" class="error hidden" role="alert"></p>
-<button id="submit">Отправить тестовую заявку</button>
+<button id="submit">Отправить заявку</button>
 </section>
 <section id="done" class="card success hidden"><div class="emoji">🧽</div><h2>Заявка принята</h2><p id="result"></p><button id="back">Вернуться к форме</button></section>
 <script>
@@ -39,17 +39,23 @@ $('#submit').onclick=async()=>{
   $('#error').classList.add('hidden');
   if(!$('#consent').checked){$('#error').textContent='Отметьте согласие на обработку данных.';$('#error').classList.remove('hidden');return}
   if(!$('#address').value.trim()||!$('#date').value||!$('#name').value.trim()||!$('#phone').value.trim()){ $('#error').textContent='Заполните адрес, дату, имя и телефон.';$('#error').classList.remove('hidden');return}
-  if(!tg?.initData){$('#error').textContent='Откройте форму через Telegram-бота, чтобы подтвердить тестовую отправку.';$('#error').classList.remove('hidden');return}
-  const button=$('#submit');button.disabled=true;button.textContent='Создаём тест…';
+  if(!tg?.initData){$('#error').textContent='Откройте форму через Telegram-бота, чтобы безопасно отправить заявку.';$('#error').classList.remove('hidden');return}
+  const button=$('#submit');button.disabled=true;button.textContent='Отправляем…';
   try{
-    // The API ignores all form values and stores only fixed synthetic test data.
-    const response=await fetch(API_BASE+'/api/test-requests',{method:'POST',headers:{'Content-Type':'application/json','X-Telegram-Init-Data':tg.initData},body:'{}'});
+    const payload={
+      service:labels[$('#service').value],
+      address:$('#district').value+', '+$('#address').value.trim()+' ('+$('#area').value+' м²)',
+      preferred_time:$('#date').value,
+      customer_contact:$('#name').value.trim()+', '+$('#phone').value.trim(),
+      notes:'Клиент согласился на обработку данных.'
+    };
+    const response=await fetch(API_BASE+'/api/requests',{method:'POST',headers:{'Content-Type':'application/json','X-Telegram-Init-Data':tg.initData},body:JSON.stringify(payload)});
     const data=await response.json().catch(()=>({}));
     if(!response.ok)throw new Error(data.detail||('Ошибка сервера: '+response.status));
-    $('#result').textContent='Тестовая заявка №'+data.id+' создана. В панели владельца она помечена как тестовая.';
+    $('#result').textContent='Заявка №'+data.id+' сохранена. Владелец свяжется с вами для подтверждения.';
     $('#form').classList.add('hidden');$('#done').classList.remove('hidden');
   }catch(error){$('#error').textContent='Не удалось создать тестовую заявку: '+error.message;$('#error').classList.remove('hidden')}
-  finally{button.disabled=false;button.textContent='Отправить тестовую заявку'}
+  finally{button.disabled=false;button.textContent='Отправить заявку'}
 };
 $('#back').onclick=()=>{$('#done').classList.add('hidden');$('#form').classList.remove('hidden')};
 </script></body></html>
