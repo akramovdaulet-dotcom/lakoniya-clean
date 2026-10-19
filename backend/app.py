@@ -134,6 +134,8 @@ def initialize_db():
         # Where the request came from: 'site' (public website form) or 'bot' (Telegram
         # Mini App). NULL on rows created before this column existed (those came from the bot).
         add_column_if_missing(db, "requests", "source", "TEXT")
+        # JSON snapshot of selected extra services and quantities.
+        add_column_if_missing(db, "requests", "additional_services_json", "TEXT")
 
 
 def add_column_if_missing(db, table: str, column: str, column_type: str) -> None:
@@ -255,15 +257,41 @@ def owner_user(user: dict = Depends(authenticated_user)) -> dict:
 # telegram-mini-apps/customer/index.html (the form only displays the estimate;
 # the amount owners see is always computed here, never taken from the browser).
 SERVICE_RATES = {"support": 180, "deep": 320, "repair": 400}
+ADDITIONAL_SERVICE_RATES = {"windows": 400, "ironing": 500, "dishes": 500}
+ADDITIONAL_SERVICE_LABELS = {"windows": "Мытьё окон", "ironing": "Глажка вещей", "dishes": "Мытьё посуды"}
+ADDITIONAL_SERVICE_UNITS = {"windows": "створка", "ironing": "час", "dishes": "час"}
+ADDITIONAL_SERVICE_MAX = {"windows": 40, "ironing": 12, "dishes": 12}
 MIN_AREA, MAX_AREA = 10, 500
 
 
-def estimate_amount(service_code, area):
-    """Preliminary amount in rubles, or None if service or area is unknown/out of range."""
+def normalize_additional_services(value):
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("additional_services must be an object")
+    result = {}
+    for code, quantity in value.items():
+        if code not in ADDITIONAL_SERVICE_RATES:
+            raise ValueError("unknown additional service")
+        if isinstance(quantity, bool) or not isinstance(quantity, int):
+            raise ValueError("quantity must be an integer")
+        if quantity < 0 or quantity > ADDITIONAL_SERVICE_MAX[code]:
+            raise ValueError("quantity out of range")
+        if quantity:
+            result[code] = quantity
+    return result
+
+
+def estimate_amount(service_code, area, additional_services=None):
+    """Calculate estimate on the server; prices sent by clients are never trusted."""
     rate = SERVICE_RATES.get(service_code or "")
-    if rate is None or not isinstance(area, int) or not MIN_AREA <= area <= MAX_AREA:
+    if rate is None or isinstance(area, bool) or not isinstance(area, int) or not MIN_AREA <= area <= MAX_AREA:
         return None
-    return rate * area
+    try:
+        extras = normalize_additional_services(additional_services)
+    except ValueError:
+        return None
+    return rate * area + sum(ADDITIONAL_SERVICE_RATES[k] * v for k, v in extras.items())
 
 
 def format_amount(amount) -> str:
@@ -290,6 +318,12 @@ class RequestCreate(BaseModel):
     # (such requests simply have no amount).
     service_code: str | None = Field(default=None, max_length=20)
     area: int | None = Field(default=None, ge=MIN_AREA, le=MAX_AREA)
+    additional_services: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("additional_services")
+    @classmethod
+    def validate_additional_services(cls, value):
+        return normalize_additional_services(value)
 
 
 def collapse_spaces(value: str) -> str:
@@ -311,6 +345,12 @@ class PublicRequestCreate(BaseModel):
     notes: str = Field(default="", max_length=1000)
     consent: bool  # required: a missing value is rejected too
     website: str = Field(default="", max_length=200)  # honeypot: real visitors never fill it
+    additional_services: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("additional_services")
+    @classmethod
+    def validate_additional_services(cls, value):
+        return normalize_additional_services(value)
 
     @field_validator("name", "address", "district", "channel", mode="before")
     @classmethod
@@ -431,6 +471,7 @@ def format_request_notification(
     notes: str,
     *,
     estimated_amount=None,
+    additional_services=None,
     source: str = "bot",
     synthetic: bool = False,
 ) -> str:
@@ -460,6 +501,7 @@ def format_request_notification(
                 else "не рассчитана"
             ),
             f"Контакт: {clip(customer_contact)}",
+            *(["Доп. услуги: " + "; ".join(ADDITIONAL_SERVICE_LABELS[k] + " × " + str(v) + " " + ADDITIONAL_SERVICE_UNITS[k] + " = " + format_amount(ADDITIONAL_SERVICE_RATES[k] * v) for k, v in normalize_additional_services(additional_services).items())] if additional_services else []),
             f"Комментарий: {clip(notes, 500)}",
         ]
     )
@@ -562,6 +604,7 @@ def pricing():
     return {
         "rates": SERVICE_RATES,
         "labels": SERVICE_LABELS,
+        "additional_services": {k: {"label": ADDITIONAL_SERVICE_LABELS[k], "rate": v, "unit": ADDITIONAL_SERVICE_UNITS[k], "max_quantity": ADDITIONAL_SERVICE_MAX[k]} for k, v in ADDITIONAL_SERVICE_RATES.items()},
         "min_area": MIN_AREA,
         "max_area": MAX_AREA,
     }
@@ -584,7 +627,8 @@ def create_public_request(
         notify_logger.info("Public request ignored: honeypot field filled")
         return {"id": 0, "status": "Новая"}
 
-    amount = estimate_amount(payload.service_code, payload.area)
+    amount = estimate_amount(payload.service_code, payload.area, payload.additional_services)
+    extras_json = json.dumps(payload.additional_services, ensure_ascii=False, sort_keys=True)
     address = (f"{payload.district}, " if payload.district else "") + (
         f"{payload.address} ({payload.area} м²)"
     )
@@ -608,8 +652,8 @@ def create_public_request(
             db,
             """INSERT INTO requests
                (service, address, preferred_time, customer_contact, notes, status,
-                created_at, customer_telegram_id, estimated_amount, source)
-               VALUES (?, ?, ?, ?, ?, 'Новая', ?, NULL, ?, 'site')""",
+                created_at, customer_telegram_id, estimated_amount, source, additional_services_json)
+               VALUES (?, ?, ?, ?, ?, 'Новая', ?, NULL, ?, 'site', ?)""",
             (
                 SERVICE_LABELS[payload.service_code],
                 address,
@@ -618,6 +662,7 @@ def create_public_request(
                 notes,
                 now,
                 amount,
+                extras_json,
             ),
             returning_id=True,
         )
@@ -631,6 +676,7 @@ def create_public_request(
             contact,
             notes,
             estimated_amount=amount,
+            additional_services=payload.additional_services,
             source="site",
         ),
     )
@@ -644,14 +690,15 @@ def create_request(
     user: dict = Depends(customer_user),
 ):
     # Customer Mini App must send initData signed by the customer bot's token.
-    amount = estimate_amount(payload.service_code, payload.area)
+    amount = estimate_amount(payload.service_code, payload.area, payload.additional_services)
+    extras_json = json.dumps(payload.additional_services, ensure_ascii=False, sort_keys=True)
     with connect_db() as db:
         request_id = execute_db(
             db,
             """INSERT INTO requests
                (service, address, preferred_time, customer_contact, notes, status,
-                created_at, customer_telegram_id, estimated_amount, source)
-               VALUES (?, ?, ?, ?, ?, 'Новая', ?, ?, ?, 'bot')""",
+                created_at, customer_telegram_id, estimated_amount, source, additional_services_json)
+               VALUES (?, ?, ?, ?, ?, 'Новая', ?, ?, ?, 'bot', ?)""",
             (
                 payload.service,
                 payload.address,
@@ -661,6 +708,7 @@ def create_request(
                 int(time.time()),
                 user["id"],
                 amount,
+                extras_json,
             ),
             returning_id=True,
         )
@@ -674,6 +722,7 @@ def create_request(
             payload.customer_contact,
             payload.notes,
             estimated_amount=amount,
+            additional_services=payload.additional_services,
         ),
     )
     background_tasks.add_task(

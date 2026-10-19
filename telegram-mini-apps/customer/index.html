@@ -15,6 +15,11 @@
 <p class="notice">Укажите данные для связи. Заявка будет сохранена в базе и передана владельцу для подтверждения.</p>
 <label class="label" for="service">Что нужно убрать?</label><select id="service"><option value="support">Поддерживающая уборка</option><option value="deep">Генеральная уборка</option><option value="repair">После ремонта</option></select>
 <label class="label" for="area">Площадь, м²</label><input id="area" type="number" min="10" max="500" value="45" required>
+<details class="card"><summary>Дополнительные услуги</summary>
+<label class="label"><input id="extraWindows" type="checkbox"> Мытьё окон — 400 ₽/створка</label><input id="windowsCount" type="number" min="1" max="40" value="1" disabled>
+<label class="label"><input id="extraIroning" type="checkbox"> Глажка — 500 ₽/час</label><input id="ironingHours" type="number" min="1" max="12" value="1" disabled>
+<label class="label"><input id="extraDishes" type="checkbox"> Мытьё посуды — 500 ₽/час</label><input id="dishesHours" type="number" min="1" max="12" value="1" disabled>
+</details>
 <label class="label" for="district">Район Уфы</label><select id="district"><option>Дёмский</option><option>Калининский</option><option>Кировский</option><option>Ленинский</option><option>Октябрьский</option><option>Орджоникидзевский</option><option>Советский</option></select>
 <label class="label" for="address">Адрес уборки</label><input id="address" placeholder="Улица, дом, квартира" maxlength="300" required>
 <label class="label" for="date">Желаемая дата</label><input id="date" type="date" required>
@@ -35,8 +40,10 @@ const labels={support:'Поддерживающая уборка',deep:'Гене
 const $=s=>document.querySelector(s);
 // Same 10..500 limits as the server, which recalculates the amount itself.
 function areaValue(){return Math.max(10,Math.min(500,Math.round(Number($('#area').value)||0)))}
-function estimate(){$('#price').textContent=(areaValue()*rates[$('#service').value]).toLocaleString('ru-RU')+' ₽'}
-$('#area').addEventListener('input',estimate);$('#service').addEventListener('change',estimate);estimate();
+function extrasPayload(){return {...($('#extraWindows').checked?{windows:Math.max(1,Math.min(40,Math.round(Number($('#windowsCount').value)||1)))}:{}),...($('#extraIroning').checked?{ironing:Math.max(1,Math.min(12,Math.round(Number($('#ironingHours').value)||1)))}:{}),...($('#extraDishes').checked?{dishes:Math.max(1,Math.min(12,Math.round(Number($('#dishesHours').value)||1)))}:{})}}
+function estimate(){const e=extrasPayload();const total=areaValue()*rates[$('#service').value]+(e.windows||0)*400+(e.ironing||0)*500+(e.dishes||0)*500;$('#price').textContent=total.toLocaleString('ru-RU')+' ₽'}
+$('#area').addEventListener('input',estimate);$('#service').addEventListener('change',estimate);
+[['Windows','windowsCount'],['Ironing','ironingHours'],['Dishes','dishesHours']].forEach(([name,id])=>{$('#extra'+name).addEventListener('change',()=>{$('#'+id).disabled=!$('#extra'+name).checked;estimate()});$('#'+id).addEventListener('input',estimate)});estimate();
 $('#submit').onclick=async()=>{
   $('#error').classList.add('hidden');
   if(!$('#consent').checked){$('#error').textContent='Отметьте согласие на обработку данных.';$('#error').classList.remove('hidden');return}
@@ -51,7 +58,8 @@ $('#submit').onclick=async()=>{
       customer_contact:$('#name').value.trim()+', '+$('#phone').value.trim(),
       notes:'Клиент согласился на обработку данных.',
       service_code:$('#service').value,
-      area:areaValue()
+      area:areaValue(),
+      additional_services:extrasPayload()
     };
     const response=await fetch(API_BASE+'/api/requests',{method:'POST',headers:{'Content-Type':'application/json','X-Telegram-Init-Data':tg.initData},body:JSON.stringify(payload)});
     const data=await response.json().catch(()=>({}));
