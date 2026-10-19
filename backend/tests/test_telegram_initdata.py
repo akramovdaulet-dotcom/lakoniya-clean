@@ -43,7 +43,7 @@ def make_init_data(*, token=TEST_TOKEN, include_signature=False, user_name="Daul
 def test_valid_init_data_passes_hmac_verification():
     result = app.verify_telegram_init_data(make_init_data(), TEST_TOKEN)
     assert result["id"] == 123456789
-    assert result["first_name"] == "Daulet"
+    assert result["user"]["first_name"] == "Daulet"
 
 
 def test_optional_ed25519_signature_does_not_change_hmac_validation():
