@@ -98,6 +98,11 @@ def verify_telegram_init_data(init_data: str, bot_token: str) -> dict:
     if not bot_token:
         raise HTTPException(status_code=503, detail="This Telegram Mini App is not configured")
     if not init_data or len(init_data) > 8192:
+        import logging
+        logging.getLogger("lakoniya.telegram_auth").warning(
+            "Telegram initData rejected before parsing: present=%s length=%d",
+            bool(init_data), len(init_data or ""),
+        )
         raise HTTPException(status_code=401, detail="Missing or invalid Telegram auth data")
 
     parsed = dict(parse_qsl(init_data, keep_blank_values=True))
@@ -106,15 +111,30 @@ def verify_telegram_init_data(init_data: str, bot_token: str) -> dict:
     # The optional `signature` field is excluded only from the separate
     # third-party Ed25519 validation data-check-string.
     if not received_hash:
+        import logging
+        logging.getLogger("lakoniya.telegram_auth").warning(
+            "Telegram initData rejected: hash_field_missing fields=%s",
+            ",".join(sorted(parsed.keys())),
+        )
         raise HTTPException(status_code=401, detail="Missing Telegram signature")
 
     try:
         auth_date = int(parsed.get("auth_date", "0"))
     except ValueError:
+        import logging
+        logging.getLogger("lakoniya.telegram_auth").warning(
+            "Telegram initData rejected: auth_date_invalid fields=%s",
+            ",".join(sorted(parsed.keys())),
+        )
         raise HTTPException(status_code=401, detail="Invalid auth date")
 
     now = int(time.time())
     if auth_date > now + 30 or now - auth_date > INIT_DATA_MAX_AGE_SECONDS:
+        import logging
+        logging.getLogger("lakoniya.telegram_auth").warning(
+            "Telegram initData rejected: auth_date_out_of_range age_seconds=%d",
+            now - auth_date,
+        )
         raise HTTPException(status_code=401, detail="Telegram auth data expired")
 
     data_check_string = "\n".join(
@@ -151,6 +171,10 @@ def verify_telegram_init_data(init_data: str, bot_token: str) -> dict:
         user = json.loads(parsed["user"])
         user_id = int(user["id"])
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        import logging
+        logging.getLogger("lakoniya.telegram_auth").warning(
+            "Telegram initData HMAC valid but user field invalid"
+        )
         raise HTTPException(status_code=401, detail="Invalid Telegram user")
 
     return {"id": user_id, "user": user}
