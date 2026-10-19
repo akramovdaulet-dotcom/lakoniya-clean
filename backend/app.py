@@ -675,6 +675,8 @@ def create_public_request(
             contact,
             notes,
             estimated_amount=amount,
+            additional_services=payload.additional_services,
+            additional_services=payload.additional_services,
             source="site",
         ),
     )
