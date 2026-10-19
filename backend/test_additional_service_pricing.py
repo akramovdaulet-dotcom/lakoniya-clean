@@ -1,4 +1,16 @@
 """Regression tests for server-side additional cleaning service pricing."""
+import os
+
+# Isolated test-only configuration must be set before importing app.
+# Never use production secrets in tests.
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "owner-test-token-not-for-production")
+os.environ.setdefault("CUSTOMER_BOT_TOKEN", "customer-test-token-not-for-production")
+os.environ.setdefault("OWNER_TELEGRAM_IDS", "547686782,1086767973")
+os.environ.setdefault("DATABASE_PATH", "/tmp/lakoniya-test-pricing.sqlite3")
+os.environ.setdefault("ALLOWED_ORIGINS", "https://lakoniya-miniapp-test.pages.dev")
+os.environ.setdefault("NOTIFY_OWNERS", "false")
+os.environ.setdefault("NOTIFY_CUSTOMERS", "false")
+
 try:
     # The backend workflow runs pytest with backend/ as its working directory.
     from app import (
