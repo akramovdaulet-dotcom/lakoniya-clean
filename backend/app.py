@@ -129,7 +129,23 @@ def verify_telegram_init_data(init_data: str, bot_token: str) -> dict:
     ).hexdigest()
 
     if not hmac.compare_digest(expected_hash, received_hash):
-        raise HTTPException(status_code=401, detail="Invalid Telegram signature")
+        # Safe diagnostics only: never log initData, token, hash, user or contact data.
+        # These fields help distinguish malformed input from a token/algorithm mismatch.
+        import logging
+        logger = logging.getLogger("lakoniya.telegram_auth")
+        logger.warning(
+            "Telegram initData HMAC mismatch: init_data_len=%d fields=%s "
+            "has_signature=%s auth_date_age_seconds=%d token_len=%d",
+            len(init_data),
+            ",".join(sorted(parsed.keys())),
+            "signature" in parsed,
+            now - auth_date,
+            len(bot_token),
+        )
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid Telegram signature (diagnostic logged safely)",
+        )
 
     try:
         user = json.loads(parsed["user"])
