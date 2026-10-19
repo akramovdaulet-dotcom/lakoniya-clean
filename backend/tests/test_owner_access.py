@@ -15,6 +15,7 @@ os.environ["DATABASE_PATH"] = "/tmp/lakoniya-test.sqlite3"
 os.environ["ALLOWED_ORIGINS"] = "https://lakoniya-miniapp-test.pages.dev"
 # Tests must never call the real Telegram API; notification tests enable it explicitly.
 os.environ["NOTIFY_OWNERS"] = "false"
+os.environ["NOTIFY_CUSTOMERS"] = "false"
 
 import httpx
 import pytest
@@ -283,6 +284,267 @@ def test_synthetic_request_notification_is_marked_as_test(monkeypatch):
     assert response.status_code == 201
     assert len(texts) == 2
     assert all("ТЕСТОВАЯ заявка" in text for text in texts)
+
+
+CUSTOMER_TELEGRAM_ID = 123456789  # the user signed into customer_headers()
+
+
+class SentMessages:
+    """Stands in for httpx.post and records Telegram sendMessage calls per bot."""
+
+    def __init__(self, status_code=200):
+        self.status_code = status_code
+        self.calls = []
+
+    def __call__(self, url, json=None, timeout=None):
+        self.calls.append((url, json))
+        return FakeResponse(self.status_code)
+
+    def _sent_with(self, token):
+        return [
+            body
+            for url, body in self.calls
+            if url == f"https://api.telegram.org/bot{token}/sendMessage"
+        ]
+
+    def to_customers(self):
+        return self._sent_with(os.environ["CUSTOMER_BOT_TOKEN"])
+
+    def to_owners(self):
+        return self._sent_with(os.environ["TELEGRAM_BOT_TOKEN"])
+
+
+def manager_headers():
+    return {"X-Telegram-Init-Data": signed_init_data(1086767973)}
+
+
+def create_customer_request():
+    response = client.post("/api/requests", json=CUSTOMER_PAYLOAD, headers=customer_headers())
+    assert response.status_code == 201
+    return response.json()["id"]
+
+
+def set_status(request_id, status):
+    return client.patch(
+        f"/api/requests/{request_id}/status",
+        json={"status": status},
+        headers=manager_headers(),
+    )
+
+
+def test_customer_gets_accepted_message_when_request_is_created(monkeypatch):
+    sent = SentMessages()
+    monkeypatch.setattr(api.httpx, "post", sent)
+    monkeypatch.setattr(api, "NOTIFY_CUSTOMERS", True)
+    request_id = create_customer_request()
+    assert sent.to_customers() == [
+        {"chat_id": CUSTOMER_TELEGRAM_ID, "text": f"✅ Заявка №{request_id} принята"}
+    ]
+    assert sent.to_owners() == []  # owner notifications are switched off in this test
+
+
+def test_customer_is_told_when_owner_sets_processing_then_handed_over(monkeypatch):
+    sent = SentMessages()
+    monkeypatch.setattr(api.httpx, "post", sent)
+    request_id = create_customer_request()  # NOTIFY_CUSTOMERS is off here
+    monkeypatch.setattr(api, "NOTIFY_CUSTOMERS", True)
+    assert set_status(request_id, "В обработке").status_code == 200
+    assert set_status(request_id, "Передана сотруднику").status_code == 200
+    assert [message["text"] for message in sent.to_customers()] == [
+        f"⏳ Заявка №{request_id} в обработке",
+        f"👷 Заявка №{request_id} передана сотруднику",
+    ]
+    assert {message["chat_id"] for message in sent.to_customers()} == {CUSTOMER_TELEGRAM_ID}
+
+
+def test_customer_is_not_messaged_for_repeats_or_other_statuses(monkeypatch):
+    sent = SentMessages()
+    monkeypatch.setattr(api.httpx, "post", sent)
+    request_id = create_customer_request()
+    monkeypatch.setattr(api, "NOTIFY_CUSTOMERS", True)
+    assert set_status(request_id, "В обработке").status_code == 200
+    for status in ("В обработке", "Новая", "Подтверждена", "В работе", "Завершена", "Отменена"):
+        assert set_status(request_id, status).status_code == 200
+    assert [message["text"] for message in sent.to_customers()] == [
+        f"⏳ Заявка №{request_id} в обработке"
+    ]
+
+
+def test_customer_notification_failures_never_break_status_update(monkeypatch, caplog):
+    request_id = create_customer_request()
+    monkeypatch.setattr(api, "NOTIFY_CUSTOMERS", True)
+
+    def failing_post(url, json=None, timeout=None):
+        raise httpx.ConnectError("boom " + url)
+
+    monkeypatch.setattr(api.httpx, "post", failing_post)
+    assert set_status(request_id, "В обработке").status_code == 200
+
+    monkeypatch.setattr(api.httpx, "post", SentMessages(status_code=403))
+    with caplog.at_level("WARNING", logger="lakoniya.notify"):
+        assert set_status(request_id, "Передана сотруднику").status_code == 200
+    assert f"request_id={request_id} status=403" in caplog.text
+    assert os.environ["CUSTOMER_BOT_TOKEN"] not in caplog.text
+    assert str(CUSTOMER_TELEGRAM_ID) not in caplog.text
+
+
+def test_request_without_customer_telegram_id_is_skipped_silently(monkeypatch):
+    sent = SentMessages()
+    monkeypatch.setattr(api.httpx, "post", sent)
+    monkeypatch.setattr(api, "NOTIFY_CUSTOMERS", True)
+    with api.connect_db() as db:  # a request created before this feature existed
+        legacy_id = api.execute_db(
+            db,
+            """INSERT INTO requests
+               (service, address, preferred_time, customer_contact, notes, status, created_at)
+               VALUES ('Старая', 'Адрес', '2099-01-01', 'Контакт', '', 'Новая', 1)""",
+            returning_id=True,
+        )
+    assert set_status(legacy_id, "Передана сотруднику").status_code == 200
+    assert sent.calls == []
+
+
+def test_status_update_for_missing_request_returns_404():
+    assert set_status(987654321, "В обработке").status_code == 404
+
+
+def test_unknown_status_is_rejected():
+    request_id = create_customer_request()
+    assert set_status(request_id, "Выдуманный статус").status_code == 422
+
+
+def test_owner_request_list_does_not_expose_customer_telegram_id():
+    create_customer_request()
+    response = client.get("/api/requests", headers=manager_headers())
+    assert response.status_code == 200
+    assert response.json()["requests"]
+    for item in response.json()["requests"]:
+        assert "customer_telegram_id" not in item
+
+
+def test_synthetic_request_customer_message_is_marked_as_test(monkeypatch):
+    sent = SentMessages()
+    monkeypatch.setenv("ENABLE_SYNTHETIC_TEST_REQUESTS", "true")
+    monkeypatch.setattr(api.httpx, "post", sent)
+    monkeypatch.setattr(api, "NOTIFY_CUSTOMERS", True)
+    response = client.post("/api/test-requests", headers=customer_headers())
+    assert response.status_code == 201
+    assert sent.to_customers() == [
+        {
+            "chat_id": CUSTOMER_TELEGRAM_ID,
+            "text": f"🧪 Тест: ✅ Заявка №{response.json()['id']} принята",
+        }
+    ]
+
+
+def test_estimate_amount_uses_server_rates_and_limits():
+    assert api.estimate_amount("support", 45) == 8100
+    assert api.estimate_amount("deep", 50) == 16000
+    assert api.estimate_amount("repair", 10) == 4000
+    assert api.estimate_amount("repair", 500) == 200000
+    assert api.estimate_amount("support", 9) is None
+    assert api.estimate_amount("support", 501) is None
+    assert api.estimate_amount("unknown", 45) is None
+    assert api.estimate_amount(None, 45) is None
+    assert api.estimate_amount("support", None) is None
+    assert api.format_amount(8100) == "8 100 ₽"
+    assert api.format_amount(200000) == "200 000 ₽"
+
+
+def test_owner_message_contains_server_calculated_amount(monkeypatch):
+    sent = SentMessages()
+    monkeypatch.setattr(api.httpx, "post", sent)
+    monkeypatch.setattr(api, "NOTIFY_OWNERS", True)
+    payload = {**CUSTOMER_PAYLOAD, "service_code": "deep", "area": 50}
+    response = client.post("/api/requests", json=payload, headers=customer_headers())
+    assert response.status_code == 201
+    messages = sent.to_owners()
+    assert len(messages) == 2  # both owners
+    assert all("Сумма: 16 000 ₽ (предварительно)" in message["text"] for message in messages)
+
+
+def test_amount_is_stored_and_shown_to_owner_in_request_list():
+    payload = {**CUSTOMER_PAYLOAD, "service_code": "repair", "area": 60}
+    request_id = client.post("/api/requests", json=payload, headers=customer_headers()).json()["id"]
+    listed = client.get("/api/requests", headers=manager_headers()).json()["requests"]
+    assert next(item for item in listed if item["id"] == request_id)["estimated_amount"] == 24000
+
+
+def test_browser_cannot_set_the_amount():
+    payload = {
+        **CUSTOMER_PAYLOAD,
+        "service_code": "support",
+        "area": 45,
+        "estimated_amount": 1,  # must be ignored; the server recalculates
+    }
+    request_id = client.post("/api/requests", json=payload, headers=customer_headers()).json()["id"]
+    listed = client.get("/api/requests", headers=manager_headers()).json()["requests"]
+    assert next(item for item in listed if item["id"] == request_id)["estimated_amount"] == 8100
+
+
+def test_request_without_area_still_works_and_says_amount_not_calculated(monkeypatch):
+    sent = SentMessages()
+    monkeypatch.setattr(api.httpx, "post", sent)
+    monkeypatch.setattr(api, "NOTIFY_OWNERS", True)
+    response = client.post("/api/requests", json=CUSTOMER_PAYLOAD, headers=customer_headers())
+    assert response.status_code == 201
+    assert all("Сумма: не рассчитана" in message["text"] for message in sent.to_owners())
+    listed = client.get("/api/requests", headers=manager_headers()).json()["requests"]
+    assert next(item for item in listed if item["id"] == response.json()["id"])[
+        "estimated_amount"
+    ] is None
+
+
+def test_area_outside_allowed_range_is_rejected():
+    for area in (0, 9, 501, 100000):
+        payload = {**CUSTOMER_PAYLOAD, "service_code": "support", "area": area}
+        response = client.post("/api/requests", json=payload, headers=customer_headers())
+        assert response.status_code == 422, area
+
+
+def test_unknown_service_code_gives_no_amount_but_request_is_created():
+    payload = {**CUSTOMER_PAYLOAD, "service_code": "something", "area": 45}
+    response = client.post("/api/requests", json=payload, headers=customer_headers())
+    assert response.status_code == 201
+    listed = client.get("/api/requests", headers=manager_headers()).json()["requests"]
+    assert next(item for item in listed if item["id"] == response.json()["id"])[
+        "estimated_amount"
+    ] is None
+
+
+def test_synthetic_request_owner_message_shows_fixed_test_amount(monkeypatch):
+    sent = SentMessages()
+    monkeypatch.setenv("ENABLE_SYNTHETIC_TEST_REQUESTS", "true")
+    monkeypatch.setattr(api.httpx, "post", sent)
+    monkeypatch.setattr(api, "NOTIFY_OWNERS", True)
+    assert client.post("/api/test-requests", headers=customer_headers()).status_code == 201
+    assert all("Сумма: 8 100 ₽ (предварительно)" in m["text"] for m in sent.to_owners())
+
+
+def test_existing_database_without_the_column_is_migrated(monkeypatch, tmp_path):
+    import sqlite3
+
+    old_db = tmp_path / "old.sqlite3"
+    with sqlite3.connect(old_db) as connection:
+        connection.execute(
+            """CREATE TABLE requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, service TEXT NOT NULL,
+                address TEXT NOT NULL, preferred_time TEXT NOT NULL,
+                customer_contact TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'Новая', created_at BIGINT NOT NULL)"""
+        )
+        connection.execute(
+            "INSERT INTO requests (service, address, preferred_time, customer_contact, created_at)"
+            " VALUES ('Старая', 'Адрес', '2099-01-01', 'Контакт', 1)"
+        )
+    monkeypatch.setattr(api, "DATABASE_PATH", str(old_db))
+    api.initialize_db()
+    api.initialize_db()  # must be idempotent
+    with sqlite3.connect(old_db) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(requests)")}
+        kept = connection.execute("SELECT service, customer_telegram_id FROM requests").fetchall()
+    assert {"customer_telegram_id", "estimated_amount"} <= columns
+    assert kept == [("Старая", None)]
 
 
 # Reference values computed independently with openssl, NOT with this app's code:

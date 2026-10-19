@@ -33,7 +33,9 @@ const tg=window.Telegram?.WebApp;try{tg?.ready();tg?.expand()}catch(e){}
 const rates={support:180,deep:320,repair:400};
 const labels={support:'Поддерживающая уборка',deep:'Генеральная уборка',repair:'Уборка после ремонта'};
 const $=s=>document.querySelector(s);
-function estimate(){const a=Math.max(0,Math.min(500,Number($('#area').value)||0));$('#price').textContent=(a*rates[$('#service').value]).toLocaleString('ru-RU')+' ₽'}
+// Same 10..500 limits as the server, which recalculates the amount itself.
+function areaValue(){return Math.max(10,Math.min(500,Math.round(Number($('#area').value)||0)))}
+function estimate(){$('#price').textContent=(areaValue()*rates[$('#service').value]).toLocaleString('ru-RU')+' ₽'}
 $('#area').addEventListener('input',estimate);$('#service').addEventListener('change',estimate);estimate();
 $('#submit').onclick=async()=>{
   $('#error').classList.add('hidden');
@@ -44,15 +46,17 @@ $('#submit').onclick=async()=>{
   try{
     const payload={
       service:labels[$('#service').value],
-      address:$('#district').value+', '+$('#address').value.trim()+' ('+$('#area').value+' м²)',
+      address:$('#district').value+', '+$('#address').value.trim()+' ('+areaValue()+' м²)',
       preferred_time:$('#date').value,
       customer_contact:$('#name').value.trim()+', '+$('#phone').value.trim(),
-      notes:'Клиент согласился на обработку данных.'
+      notes:'Клиент согласился на обработку данных.',
+      service_code:$('#service').value,
+      area:areaValue()
     };
     const response=await fetch(API_BASE+'/api/requests',{method:'POST',headers:{'Content-Type':'application/json','X-Telegram-Init-Data':tg.initData},body:JSON.stringify(payload)});
     const data=await response.json().catch(()=>({}));
     if(!response.ok)throw new Error(data.detail||('Ошибка сервера: '+response.status));
-    $('#result').textContent='Заявка №'+data.id+' сохранена. Владелец свяжется с вами для подтверждения.';
+    $('#result').textContent='Заявка №'+data.id+' сохранена. О ходе заявки мы будем сообщать сообщениями в этом чате.';
     $('#form').classList.add('hidden');$('#done').classList.remove('hidden');
   }catch(error){$('#error').textContent='Не удалось создать тестовую заявку: '+error.message;$('#error').classList.remove('hidden')}
   finally{button.disabled=false;button.textContent='Отправить заявку'}
