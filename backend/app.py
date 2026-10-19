@@ -102,6 +102,9 @@ def verify_telegram_init_data(init_data: str, bot_token: str) -> dict:
 
     parsed = dict(parse_qsl(init_data, keep_blank_values=True))
     received_hash = parsed.pop("hash", None)
+    # Telegram also includes an Ed25519 `signature` field in newer Mini Apps.
+    # It is not part of the bot-token HMAC data-check-string.
+    parsed.pop("signature", None)
     if not received_hash:
         raise HTTPException(status_code=401, detail="Missing Telegram signature")
 
