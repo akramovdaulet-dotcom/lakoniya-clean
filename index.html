@@ -90,6 +90,7 @@ footer{border-top:1px solid var(--line);padding:25px 0;color:var(--muted);font-s
 <div class="field"><label for="date">Желаемая дата *</label><input id="date" name="preferred_date" type="date"></div>
 <div class="field"><label for="dirtyPhotos">Фото загрязнённых участков (необязательно, до 5 фото)</label><input id="dirtyPhotos" type="file" accept="image/jpeg,image/png,image/webp" multiple><p class="muted">Пришлите до 5 фото в формате JPG, PNG или WebP, каждое до 5 МБ. Стоимость этих участков вручную оценит менеджер.</p><p class="msg err hidden" id="photoError" role="alert"></p></div>
 <div class="field"><label for="details">Комментарий</label><textarea id="details" name="notes" rows="3" maxlength="1000" placeholder="Например: есть питомцы, нужно мытьё окон"></textarea></div>
+<div class="field"><label for="dirtyAreaPhotos">Фото загрязнений (необязательно, до 5 фото)</label><input id="dirtyAreaPhotos" type="file" accept="image/jpeg,image/png,image/webp" multiple><p class="muted" id="dirtyAreaPhotoHint">До 5 фото, каждое до 5 МБ. Стоимость этой части работ владелец оценит вручную.</p><p class="msg err hidden" id="photoError" role="alert"></p></div>
 <div class="hp" aria-hidden="true"><label>Не заполняйте это поле <input id="website" name="website" tabindex="-1" autocomplete="off"></label></div>
 <label class="consent"><input id="consent" name="consent" type="checkbox"><span>Согласен(на) на обработку персональных данных (имя, телефон, адрес) для связи по заявке. *</span></label>
 <p class="msg info hidden" id="status" role="status"></p>
@@ -188,6 +189,7 @@ function validate() {
     district: $('#district').value,
     preferred_date: $('#date').value,
     notes: $('#details').value.trim(),
+    dirty_area_photos: window.dirtyAreaPhotoData || [],
     consent: true,
     website: $('#website').value
   };
@@ -205,6 +207,13 @@ function messageFor(error) {
 
 $('#requestForm').addEventListener('submit', async event => {
   event.preventDefault();
+  hide($('#photoError'));
+  const files = Array.from($('#dirtyAreaPhotos').files || []);
+  if (files.length > 5) { show($('#photoError'), 'Можно прикрепить не больше 5 фотографий.'); return; }
+  if (files.some(file => !['image/jpeg','image/png','image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024 || file.size === 0)) { show($('#photoError'), 'Допустимы JPEG, PNG или WebP, не более 5 МБ на фото.'); return; }
+  if (files.reduce((sum, file) => sum + file.size, 0) > 20 * 1024 * 1024) { show($('#photoError'), 'Общий размер фотографий не должен превышать 20 МБ.'); return; }
+  try { window.dirtyAreaPhotoData = await Promise.all(files.map(file => new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error('Не удалось прочитать фото.')); reader.readAsDataURL(file); }))); }
+  catch (_) { show($('#photoError'), 'Не удалось прочитать фотографии. Выберите их ещё раз.'); return; }
   const payload = validate();
   if (!payload) return;
   const photoInput = $('#dirtyPhotos');
@@ -248,7 +257,7 @@ $('#requestForm').addEventListener('submit', async event => {
     $('#formBox').classList.add('hidden');
     $('#successBox').classList.remove('hidden');
     $('#successBox').focus();
-    $('#requestForm').reset(); calc();
+    $('#requestForm').reset(); window.dirtyAreaPhotoData = []; calc();
   } catch (error) {
     show($('#error'), messageFor(error));
   } finally {
