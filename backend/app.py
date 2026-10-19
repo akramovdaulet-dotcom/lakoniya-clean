@@ -255,15 +255,41 @@ def owner_user(user: dict = Depends(authenticated_user)) -> dict:
 # telegram-mini-apps/customer/index.html (the form only displays the estimate;
 # the amount owners see is always computed here, never taken from the browser).
 SERVICE_RATES = {"support": 180, "deep": 320, "repair": 400}
+ADDITIONAL_SERVICE_RATES = {"windows": 400, "ironing": 500, "dishes": 500}
+ADDITIONAL_SERVICE_LABELS = {"windows": "Мытьё окон", "ironing": "Глажка вещей", "dishes": "Мытьё посуды"}
+ADDITIONAL_SERVICE_UNITS = {"windows": "створка", "ironing": "час", "dishes": "час"}
+ADDITIONAL_SERVICE_MAX = {"windows": 40, "ironing": 12, "dishes": 12}
 MIN_AREA, MAX_AREA = 10, 500
 
 
-def estimate_amount(service_code, area):
-    """Preliminary amount in rubles, or None if service or area is unknown/out of range."""
+def normalize_additional_services(value):
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("additional_services must be an object")
+    result = {}
+    for code, quantity in value.items():
+        if code not in ADDITIONAL_SERVICE_RATES:
+            raise ValueError("unknown additional service")
+        if isinstance(quantity, bool) or not isinstance(quantity, int):
+            raise ValueError("quantity must be an integer")
+        if quantity < 0 or quantity > ADDITIONAL_SERVICE_MAX[code]:
+            raise ValueError("quantity out of range")
+        if quantity:
+            result[code] = quantity
+    return result
+
+
+def estimate_amount(service_code, area, additional_services=None):
+    """Calculate estimate on the server; prices sent by clients are never trusted."""
     rate = SERVICE_RATES.get(service_code or "")
-    if rate is None or not isinstance(area, int) or not MIN_AREA <= area <= MAX_AREA:
+    if rate is None or isinstance(area, bool) or not isinstance(area, int) or not MIN_AREA <= area <= MAX_AREA:
         return None
-    return rate * area
+    try:
+        extras = normalize_additional_services(additional_services)
+    except ValueError:
+        return None
+    return rate * area + sum(ADDITIONAL_SERVICE_RATES[k] * v for k, v in extras.items())
 
 
 def format_amount(amount) -> str:
