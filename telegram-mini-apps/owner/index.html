@@ -27,7 +27,8 @@
   const tg = window.Telegram && window.Telegram.WebApp;
   const root = document.getElementById('requests');
   const notice = document.getElementById('notice');
-  const allowedStatuses = ['Новая', 'Подтверждена', 'В работе', 'Завершена', 'Отменена'];
+  // "В обработке" and "Передана сотруднику" also send a message to the customer in the customer bot.
+  const allowedStatuses = ['Новая', 'В обработке', 'Передана сотруднику', 'Подтверждена', 'В работе', 'Завершена', 'Отменена'];
   if (tg) { try { tg.ready(); tg.expand(); } catch (_) {} }
 
   function setNotice(message, isError=false) {
@@ -105,6 +106,9 @@
       addField(card, 'Услуга', request.service);
       addField(card, 'Адрес', request.address);
       addField(card, 'Желаемое время', request.preferred_time);
+      addField(card, 'Сумма (предварительно)', request.estimated_amount == null
+        ? 'не рассчитана'
+        : Number(request.estimated_amount).toLocaleString('ru-RU') + ' ₽');
       addField(card, 'Контакт клиента', request.customer_contact);
       if (request.notes) addField(card, 'Комментарий', request.notes);
       const actions = element('div', 'actions');

@@ -47,7 +47,15 @@ ALLOWED_ORIGINS = [
     if value.strip()
 ]
 INIT_DATA_MAX_AGE_SECONDS = 3600
-ALLOWED_STATUSES = {"Новая", "Подтверждена", "В работе", "Завершена", "Отменена"}
+ALLOWED_STATUSES = {
+    "Новая",
+    "В обработке",
+    "Передана сотруднику",
+    "Подтверждена",
+    "В работе",
+    "Завершена",
+    "Отменена",
+}
 
 app = FastAPI(title="Lakoniya Clean API", version="0.2.0")
 app.add_middleware(
@@ -105,6 +113,21 @@ def initialize_db():
             )
             """
         )
+        # Telegram user id of the customer (private chat id with the customer bot),
+        # used to send status updates. Added later, so migrate existing databases.
+        add_column_if_missing(db, "requests", "customer_telegram_id", "BIGINT")
+        # Preliminary amount in rubles, computed on the server (NULL = not calculated).
+        add_column_if_missing(db, "requests", "estimated_amount", "BIGINT")
+
+
+def add_column_if_missing(db, table: str, column: str, column_type: str) -> None:
+    """Idempotent ALTER TABLE for SQLite and PostgreSQL (names are code constants)."""
+    if USE_POSTGRES:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type}")
+        return
+    existing = {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in existing:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
 
 initialize_db()
@@ -212,12 +235,35 @@ def owner_user(user: dict = Depends(authenticated_user)) -> dict:
     return user
 
 
+# Demonstration rates in rubles per square metre. Keep in sync with `rates` in
+# telegram-mini-apps/customer/index.html (the form only displays the estimate;
+# the amount owners see is always computed here, never taken from the browser).
+SERVICE_RATES = {"support": 180, "deep": 320, "repair": 400}
+MIN_AREA, MAX_AREA = 10, 500
+
+
+def estimate_amount(service_code, area):
+    """Preliminary amount in rubles, or None if service or area is unknown/out of range."""
+    rate = SERVICE_RATES.get(service_code or "")
+    if rate is None or not isinstance(area, int) or not MIN_AREA <= area <= MAX_AREA:
+        return None
+    return rate * area
+
+
+def format_amount(amount) -> str:
+    return f"{amount:,}".replace(",", " ") + " ₽"
+
+
 class RequestCreate(BaseModel):
     service: str = Field(min_length=1, max_length=100)
     address: str = Field(min_length=1, max_length=300)
     preferred_time: str = Field(min_length=1, max_length=100)
     customer_contact: str = Field(min_length=1, max_length=200)
     notes: str = Field(default="", max_length=1000)
+    # Optional so an older cached form without these fields keeps working
+    # (such requests simply have no amount).
+    service_code: str | None = Field(default=None, max_length=20)
+    area: int | None = Field(default=None, ge=MIN_AREA, le=MAX_AREA)
 
 
 class StatusUpdate(BaseModel):
@@ -237,6 +283,7 @@ def format_request_notification(
     customer_contact: str,
     notes: str,
     *,
+    estimated_amount=None,
     synthetic: bool = False,
 ) -> str:
     """Plain-text message for owners; no parse_mode, so customer text cannot inject markup."""
@@ -251,6 +298,12 @@ def format_request_notification(
             f"Услуга: {clip(service)}",
             f"Адрес: {clip(address)}",
             f"Когда: {clip(preferred_time, 100)}",
+            "Сумма: "
+            + (
+                f"{format_amount(estimated_amount)} (предварительно)"
+                if estimated_amount is not None
+                else "не рассчитана"
+            ),
             f"Контакт: {clip(customer_contact)}",
             f"Комментарий: {clip(notes, 500)}",
         ]
@@ -287,6 +340,55 @@ def notify_owners(text: str) -> None:
             )
 
 
+NOTIFY_CUSTOMERS = os.environ.get("NOTIFY_CUSTOMERS", "true").strip().lower() != "false"
+# Messages the customer receives in the customer bot, keyed by request status.
+# "Новая" is sent automatically when the request is created; the others are sent
+# when an owner moves the request to that status.
+CUSTOMER_STATUS_MESSAGES = {
+    "Новая": "✅ Заявка №{id} принята",
+    "В обработке": "⏳ Заявка №{id} в обработке",
+    "Передана сотруднику": "👷 Заявка №{id} передана сотруднику",
+}
+
+
+def customer_status_message(request_id: int, status: str, *, synthetic: bool = False):
+    """Text for the customer, or None when this status sends no message."""
+    template = CUSTOMER_STATUS_MESSAGES.get(status)
+    if template is None:
+        return None
+    text = template.format(id=request_id)
+    return f"🧪 Тест: {text}" if synthetic else text
+
+
+def notify_customer(chat_id, text, request_id: int) -> None:
+    """Send a status message to the customer through the customer bot.
+
+    Runs after the response is sent and never affects the stored request. Logs
+    only the request number, status code and exception class: no token, no
+    Telegram id, no customer data.
+    """
+    if not NOTIFY_CUSTOMERS or not chat_id or not text:
+        return
+    if not CUSTOMER_BOT_TOKEN:
+        notify_logger.warning("Customer notification skipped: customer bot not configured")
+        return
+    url = f"{TELEGRAM_API_URL}/bot{CUSTOMER_BOT_TOKEN}/sendMessage"
+    try:
+        response = httpx.post(url, json={"chat_id": chat_id, "text": text}, timeout=10)
+    except httpx.HTTPError as exc:
+        notify_logger.warning(
+            "Customer notification failed: request_id=%d %s", request_id, type(exc).__name__
+        )
+        return
+    if response.status_code != 200:
+        # 403 means the customer has not started (or has blocked) the customer bot.
+        notify_logger.warning(
+            "Customer notification rejected: request_id=%d status=%d",
+            request_id,
+            response.status_code,
+        )
+
+
 @app.get("/health")
 def health():
     return {
@@ -304,12 +406,14 @@ def create_request(
     user: dict = Depends(customer_user),
 ):
     # Customer Mini App must send initData signed by the customer bot's token.
+    amount = estimate_amount(payload.service_code, payload.area)
     with connect_db() as db:
         request_id = execute_db(
             db,
             """INSERT INTO requests
-               (service, address, preferred_time, customer_contact, notes, status, created_at)
-               VALUES (?, ?, ?, ?, ?, 'Новая', ?)""",
+               (service, address, preferred_time, customer_contact, notes, status,
+                created_at, customer_telegram_id, estimated_amount)
+               VALUES (?, ?, ?, ?, ?, 'Новая', ?, ?, ?)""",
             (
                 payload.service,
                 payload.address,
@@ -317,6 +421,8 @@ def create_request(
                 payload.customer_contact,
                 payload.notes,
                 int(time.time()),
+                user["id"],
+                amount,
             ),
             returning_id=True,
         )
@@ -329,7 +435,11 @@ def create_request(
             payload.preferred_time,
             payload.customer_contact,
             payload.notes,
+            estimated_amount=amount,
         ),
+    )
+    background_tasks.add_task(
+        notify_customer, user["id"], customer_status_message(request_id, "Новая"), request_id
     )
     return {"id": request_id, "status": "Новая"}
 
@@ -341,12 +451,14 @@ def create_synthetic_test_request(
     """Create a fixed synthetic request for end-to-end checks; never store form data."""
     if os.environ.get("ENABLE_SYNTHETIC_TEST_REQUESTS", "").lower() != "true":
         raise HTTPException(status_code=503, detail="Synthetic test requests are disabled")
+    amount = estimate_amount("support", 45)  # fixed test values: 45 m² x 180 = 8 100 ₽
     with connect_db() as db:
         request_id = execute_db(
             db,
             """INSERT INTO requests
-               (service, address, preferred_time, customer_contact, notes, status, created_at)
-               VALUES (?, ?, ?, ?, ?, 'Новая', ?)""",
+               (service, address, preferred_time, customer_contact, notes, status,
+                created_at, customer_telegram_id, estimated_amount)
+               VALUES (?, ?, ?, ?, ?, 'Новая', ?, ?, ?)""",
             (
                 "ТЕСТ — поддерживающая уборка",
                 "ТЕСТОВЫЙ АДРЕС — не использовать",
@@ -354,6 +466,8 @@ def create_synthetic_test_request(
                 "ТЕСТОВЫЙ КОНТАКТ — не использовать",
                 "SYNTHETIC_TEST_REQUEST; создано тестовым endpoint; реальные данные не передавались",
                 int(time.time()),
+                user["id"],
+                amount,
             ),
             returning_id=True,
         )
@@ -366,8 +480,15 @@ def create_synthetic_test_request(
             "2099-01-01",
             "ТЕСТОВЫЙ КОНТАКТ — не использовать",
             "SYNTHETIC_TEST_REQUEST",
+            estimated_amount=amount,
             synthetic=True,
         ),
+    )
+    background_tasks.add_task(
+        notify_customer,
+        user["id"],
+        customer_status_message(request_id, "Новая", synthetic=True),
+        request_id,
     )
     return {"id": request_id, "status": "Новая", "synthetic": True}
 
@@ -378,7 +499,7 @@ def list_requests(_: dict = Depends(owner_user)):
         rows = execute_db(
             db,
             """SELECT id, service, address, preferred_time, customer_contact,
-                      notes, status, created_at
+                      notes, status, created_at, estimated_amount
                FROM requests ORDER BY created_at DESC LIMIT 500"""
         ).fetchall()
     return {"requests": [dict(row) for row in rows]}
@@ -388,16 +509,32 @@ def list_requests(_: dict = Depends(owner_user)):
 def update_request_status(
     request_id: int,
     payload: StatusUpdate,
+    background_tasks: BackgroundTasks,
     _: dict = Depends(owner_user),
 ):
     if payload.status not in ALLOWED_STATUSES:
         raise HTTPException(status_code=422, detail="Unsupported status")
     with connect_db() as db:
-        cursor = execute_db(
+        row = execute_db(
+            db,
+            "SELECT status, customer_telegram_id FROM requests WHERE id = ?",
+            (request_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Request not found")
+        execute_db(
             db,
             "UPDATE requests SET status = ? WHERE id = ?",
             (payload.status, request_id),
         )
-        if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Request not found")
+    # Tell the customer only about a real change, and never re-send "принята" when
+    # an owner moves a request back to "Новая". Requests created before this
+    # feature have no customer_telegram_id and are skipped silently.
+    if payload.status != row["status"] and payload.status != "Новая":
+        background_tasks.add_task(
+            notify_customer,
+            row["customer_telegram_id"],
+            customer_status_message(request_id, payload.status),
+            request_id,
+        )
     return {"id": request_id, "status": payload.status}
