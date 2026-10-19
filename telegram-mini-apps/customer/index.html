@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f5f7fb"><title>Лакония Клин — заказ уборки</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--tg-theme-text-color,#172033);background:var(--tg-theme-bg-color,#f5f7fb);--card:var(--tg-theme-secondary-bg-color,#fff);--muted:var(--tg-theme-hint-color,#778197);--accent:var(--tg-theme-button-color,#2878e8)}
+*{box-sizing:border-box}body{margin:0;padding:18px 16px 34px;max-width:640px;margin-inline:auto}header{padding:8px 2px 18px}.brand{font-size:13px;font-weight:700;letter-spacing:.12em;color:var(--accent)}h1{font-size:28px;line-height:1.12;margin:8px 0}p{color:var(--muted);line-height:1.45;margin:7px 0}.card{background:var(--card);border-radius:20px;padding:17px;margin:12px 0;box-shadow:0 5px 24px #1625440a}.label{font-size:13px;font-weight:650;display:block;margin:14px 0 7px}input,select{width:100%;font:inherit;border:1px solid #dce2ec;border-radius:12px;padding:13px;background:var(--tg-theme-bg-color,#fff);color:inherit;outline:none}button{border:0;border-radius:14px;padding:14px 16px;font:inherit;font-weight:700;background:var(--accent);color:var(--tg-theme-button-text-color,#fff);width:100%;margin-top:12px}button:disabled{opacity:.6}.estimate{display:flex;justify-content:space-between;align-items:center;margin-top:16px;padding-top:15px;border-top:1px solid #e4e8ef}.price{font-size:25px;font-weight:800}.tag{display:inline-block;background:#fff0d9;color:#8a5100;border-radius:999px;padding:6px 10px;font-size:12px;font-weight:700}.notice{font-size:12px;line-height:1.45}.hidden{display:none!important}.success{text-align:center;padding:25px 5px}.emoji{font-size:34px}label.consent{display:flex;gap:9px;align-items:flex-start;font-size:13px;line-height:1.4;margin-top:15px}label.consent input{width:18px;margin-top:1px}.error{color:#b42318;font-size:13px;white-space:pre-wrap}
+</style></head>
+<body>
+<header><div class="brand">ЛАКОНИЯ КЛИН · УФА</div><h1>Чистота начинается здесь.</h1><p>Выберите уборку — мы подготовим заявку для подтверждения владельцем.</p></header>
+<section id="form" class="card">
+<span class="tag">Заявка на уборку</span>
+<p class="notice">Укажите данные для связи. Заявка будет сохранена в базе и передана владельцу для подтверждения.</p>
+<label class="label" for="service">Что нужно убрать?</label><select id="service"><option value="support">Поддерживающая уборка</option><option value="deep">Генеральная уборка</option><option value="repair">После ремонта</option></select>
+<label class="label" for="area">Площадь, м²</label><input id="area" type="number" min="10" max="500" value="45" required>
+<label class="label" for="district">Район Уфы</label><select id="district"><option>Дёмский</option><option>Калининский</option><option>Кировский</option><option>Ленинский</option><option>Октябрьский</option><option>Орджоникидзевский</option><option>Советский</option></select>
+<label class="label" for="address">Адрес уборки</label><input id="address" placeholder="Улица, дом, квартира" maxlength="300" required>
+<label class="label" for="date">Желаемая дата</label><input id="date" type="date" required>
+<div class="estimate"><div><p>Предварительная оценка</p><div class="price" id="price">— ₽</div></div><span class="tag">Не оферта</span></div>
+<p class="notice">Расчёт ориентировочный, цены демонстрационные. Итоговую стоимость подтверждает владелец.</p>
+<label class="label" for="name">Имя</label><input id="name" placeholder="Ваше имя" maxlength="80" required>
+<label class="label" for="phone">Телефон для связи</label><input id="phone" type="tel" placeholder="+7 ..." maxlength="20" required>
+<label class="consent"><input id="consent" type="checkbox"><span>Согласен(на) на передачу указанных данных для обработки заявки.</span></label>
+<p id="error" class="error hidden" role="alert"></p>
+<button id="submit">Отправить заявку</button>
+</section>
+<section id="done" class="card success hidden"><div class="emoji">🧽</div><h2>Заявка принята</h2><p id="result"></p><button id="back">Вернуться к форме</button></section>
+<script>
+const API_BASE='https://lakoniya-clean.onrender.com';
+const tg=window.Telegram?.WebApp;try{tg?.ready();tg?.expand()}catch(e){}
+const rates={support:180,deep:320,repair:400};
+const labels={support:'Поддерживающая уборка',deep:'Генеральная уборка',repair:'Уборка после ремонта'};
+const $=s=>document.querySelector(s);
+// Same 10..500 limits as the server, which recalculates the amount itself.
+function areaValue(){return Math.max(10,Math.min(500,Math.round(Number($('#area').value)||0)))}
+function estimate(){$('#price').textContent=(areaValue()*rates[$('#service').value]).toLocaleString('ru-RU')+' ₽'}
+$('#area').addEventListener('input',estimate);$('#service').addEventListener('change',estimate);estimate();
+$('#submit').onclick=async()=>{
+  $('#error').classList.add('hidden');
+  if(!$('#consent').checked){$('#error').textContent='Отметьте согласие на обработку данных.';$('#error').classList.remove('hidden');return}
+  if(!$('#address').value.trim()||!$('#date').value||!$('#name').value.trim()||!$('#phone').value.trim()){ $('#error').textContent='Заполните адрес, дату, имя и телефон.';$('#error').classList.remove('hidden');return}
+  if(!tg?.initData){$('#error').textContent='Откройте форму через Telegram-бота, чтобы безопасно отправить заявку.';$('#error').classList.remove('hidden');return}
+  const button=$('#submit');button.disabled=true;button.textContent='Отправляем…';
+  try{
+    const payload={
+      service:labels[$('#service').value],
+      address:$('#district').value+', '+$('#address').value.trim()+' ('+areaValue()+' м²)',
+      preferred_time:$('#date').value,
+      customer_contact:$('#name').value.trim()+', '+$('#phone').value.trim(),
+      notes:'Клиент согласился на обработку данных.',
+      service_code:$('#service').value,
+      area:areaValue()
+    };
+    const response=await fetch(API_BASE+'/api/requests',{method:'POST',headers:{'Content-Type':'application/json','X-Telegram-Init-Data':tg.initData},body:JSON.stringify(payload)});
+    const data=await response.json().catch(()=>({}));
+    if(!response.ok)throw new Error(data.detail||('Ошибка сервера: '+response.status));
+    $('#result').textContent='Заявка №'+data.id+' сохранена. О ходе заявки мы будем сообщать сообщениями в этом чате.';
+    $('#form').classList.add('hidden');$('#done').classList.remove('hidden');
+  }catch(error){$('#error').textContent='Не удалось создать тестовую заявку: '+error.message;$('#error').classList.remove('hidden')}
+  finally{button.disabled=false;button.textContent='Отправить заявку'}
+};
+$('#back').onclick=()=>{$('#done').classList.add('hidden');$('#form').classList.remove('hidden')};
+</script></body></html>
