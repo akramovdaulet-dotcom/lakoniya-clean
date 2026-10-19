@@ -142,7 +142,7 @@ def verify_telegram_init_data(init_data: str, bot_token: str) -> dict:
     )
     # Telegram Web Apps: secret_key = HMAC_SHA256(key=bot_token, msg="WebAppData")
     secret_key = hmac.new(
-        bot_token.encode("utf-8"), b"WebAppData", hashlib.sha256
+        b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256
     ).digest()
     expected_hash = hmac.new(
         secret_key, data_check_string.encode("utf-8"), hashlib.sha256
