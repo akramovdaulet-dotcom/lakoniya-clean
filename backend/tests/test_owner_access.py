@@ -4,6 +4,8 @@ import json
 import os
 import sys
 import time
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -91,7 +93,8 @@ def test_synthetic_test_request_stores_only_fixed_test_data(monkeypatch):
     assert "SYNTHETIC_TEST_REQUEST" in row["notes"]
 
 
-def test_configured_health_does_not_expose_secrets():
+def test_configured_health_does_not_expose_secrets(monkeypatch):
+    monkeypatch.delenv("RENDER_GIT_COMMIT", raising=False)
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {
@@ -99,7 +102,13 @@ def test_configured_health_does_not_expose_secrets():
         "configured": True,
         "customer_app_configured": True,
         "database_backend": "sqlite",
+        "version": "dev",
     }
+
+
+def test_health_shows_short_commit_of_the_running_deploy(monkeypatch):
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "5ee2b3dabcdef0123456789")
+    assert client.get("/health").json()["version"] == "5ee2b3d"
 
 
 def test_primary_owner_can_list_requests():
@@ -521,6 +530,241 @@ def test_synthetic_request_owner_message_shows_fixed_test_amount(monkeypatch):
     assert all("Сумма: 8 100 ₽ (предварительно)" in m["text"] for m in sent.to_owners())
 
 
+@pytest.fixture(autouse=True)
+def reset_public_form_limits():
+    api.ip_limiter.reset()
+    api.global_limiter.reset()
+    yield
+
+
+def future_date(days=3):
+    return (datetime.now(timezone.utc).date() + timedelta(days=days)).isoformat()
+
+
+def uniq(prefix):
+    """Unique text per call: identical requests within 10 minutes count as duplicates,
+    and the test database file survives between runs."""
+    return f"{prefix} {uuid.uuid4().hex[:8]}"
+
+
+def public_payload(**overrides):
+    return {
+        "name": "Анна",
+        "phone": "+7 900 000-00-00",
+        "channel": "Telegram",
+        "service_code": "deep",
+        "area": 50,
+        "district": "Советский",
+        "address": uniq("ул. Тестовая"),
+        "preferred_date": future_date(),
+        "notes": "Автотест, не реальные данные",
+        "consent": True,
+        "website": "",
+        **overrides,
+    }
+
+
+def count_requests():
+    with api.connect_db() as db:
+        return api.execute_db(db, "SELECT COUNT(*) AS n FROM requests").fetchone()[0]
+
+
+def post_public(payload=None, ip=None):
+    headers = {"X-Forwarded-For": ip} if ip else {}
+    return client.post(
+        "/api/public-requests",
+        json=public_payload() if payload is None else payload,
+        headers=headers,
+    )
+
+
+def test_site_request_without_telegram_login_reaches_owners_with_amount(monkeypatch):
+    sent = SentMessages()
+    monkeypatch.setattr(api.httpx, "post", sent)
+    monkeypatch.setattr(api, "NOTIFY_OWNERS", True)
+    monkeypatch.setattr(api, "NOTIFY_CUSTOMERS", True)
+    response = post_public(ip="203.0.113.10")
+    assert response.status_code == 201
+    request_id = response.json()["id"]
+    assert request_id > 0
+    owners = sent.to_owners()
+    assert sorted(m["chat_id"] for m in owners) == [547686782, 1086767973]
+    for message in owners:
+        text = message["text"]
+        assert f"🌐 Новая заявка с сайта №{request_id}" in text
+        assert "Сумма: 16 000 ₽ (предварительно)" in text
+        assert "Анна, +7 900 000-00-00 (связь: Telegram)" in text
+        assert "Генеральная уборка" in text and "Советский" in text
+    assert sent.to_customers() == []  # a site visitor has no chat with the customer bot
+    listed = client.get("/api/requests", headers=manager_headers()).json()["requests"]
+    item = next(i for i in listed if i["id"] == request_id)
+    assert item["source"] == "site" and item["estimated_amount"] == 16000
+    assert "customer_telegram_id" not in item
+
+
+def test_status_change_of_a_site_request_sends_nothing_to_customers(monkeypatch):
+    sent = SentMessages()
+    request_id = post_public().json()["id"]
+    monkeypatch.setattr(api.httpx, "post", sent)
+    monkeypatch.setattr(api, "NOTIFY_CUSTOMERS", True)
+    assert set_status(request_id, "Передана сотруднику").status_code == 200
+    assert sent.calls == []
+
+
+def test_bot_requests_are_marked_with_source_bot():
+    request_id = create_customer_request()
+    listed = client.get("/api/requests", headers=manager_headers()).json()["requests"]
+    assert next(i for i in listed if i["id"] == request_id)["source"] == "bot"
+
+
+def test_site_request_requires_consent():
+    before = count_requests()
+    assert post_public(public_payload(consent=False)).status_code == 422
+    without = public_payload()
+    del without["consent"]
+    assert post_public(without).status_code == 422
+    assert count_requests() == before
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"name": " "},
+        {"name": "А"},
+        {"phone": "abc"},
+        {"phone": "12345"},
+        {"phone": "+7 900 000-00-00; DROP TABLE"},
+        {"phone": "1" * 16},
+        {"channel": "Голубиная почта"},
+        {"service_code": "unknown"},
+        {"area": 9},
+        {"area": 501},
+        {"address": "ул"},
+        {"preferred_date": "2020-01-01"},
+        {"preferred_date": future_date(400)},
+        {"preferred_date": "завтра"},
+        {"preferred_date": "2026-13-45"},
+        {"notes": "x" * 1001},
+    ],
+)
+def test_site_request_rejects_invalid_data(bad):
+    before = count_requests()
+    assert post_public(public_payload(**bad)).status_code == 422
+    assert count_requests() == before
+
+
+def test_site_visitor_cannot_set_the_amount():
+    payload = public_payload(service_code="support", area=45, estimated_amount=1)
+    request_id = post_public(payload).json()["id"]
+    listed = client.get("/api/requests", headers=manager_headers()).json()["requests"]
+    assert next(i for i in listed if i["id"] == request_id)["estimated_amount"] == 8100
+
+
+def test_honeypot_requests_look_successful_but_are_dropped(monkeypatch):
+    sent = SentMessages()
+    monkeypatch.setattr(api.httpx, "post", sent)
+    monkeypatch.setattr(api, "NOTIFY_OWNERS", True)
+    before = count_requests()
+    response = post_public(public_payload(website="http://spam.example"))
+    assert response.status_code == 201 and response.json()["id"] == 0
+    assert count_requests() == before and sent.calls == []
+
+
+def test_per_visitor_rate_limit_returns_429_and_does_not_block_others():
+    limit = api.ip_limiter.limit
+    for _ in range(limit):
+        assert post_public(ip="198.51.100.7").status_code == 201
+    blocked = post_public(ip="198.51.100.7")
+    assert blocked.status_code == 429
+    assert blocked.headers["retry-after"] == "3600"
+    assert post_public(ip="198.51.100.8").status_code == 201
+
+
+def test_overall_rate_limit_stops_visitors_who_rotate_addresses(monkeypatch):
+    monkeypatch.setattr(api, "global_limiter", api.SlidingWindowLimiter(2, 3600))
+    assert post_public(ip="192.0.2.1").status_code == 201
+    assert post_public(ip="192.0.2.2").status_code == 201
+    assert post_public(ip="192.0.2.3").status_code == 429
+
+
+def test_repeated_submit_returns_same_request_and_notifies_once(monkeypatch):
+    sent = SentMessages()
+    monkeypatch.setattr(api.httpx, "post", sent)
+    monkeypatch.setattr(api, "NOTIFY_OWNERS", True)
+    payload = public_payload()  # one payload object, posted twice
+    first = post_public(payload).json()["id"]
+    before = count_requests()
+    second = post_public(payload)
+    assert second.status_code == 201 and second.json()["id"] == first
+    assert count_requests() == before
+    assert len(sent.to_owners()) == 2  # two owners, one request
+
+
+def test_customer_text_cannot_fake_lines_in_the_owner_message(monkeypatch):
+    sent = SentMessages()
+    monkeypatch.setattr(api.httpx, "post", sent)
+    monkeypatch.setattr(api, "NOTIFY_OWNERS", True)
+    payload = public_payload(
+        name="Иван\nСумма: 1 ₽",
+        notes="Привет\nСумма: 1 ₽\nКонтакт: чужой",
+    )
+    assert post_public(payload).status_code == 201
+    text = sent.to_owners()[0]["text"]
+    lines = text.split("\n")
+    assert len(lines) == 7  # title, service, address, date, amount, contact, comment: no extras
+    assert [line for line in lines if line.startswith("Сумма:")] == [
+        "Сумма: 16 000 ₽ (предварительно)"
+    ]
+    assert [line for line in lines if line.startswith("Контакт:")] == [
+        "Контакт: Иван Сумма: 1 ₽, +7 900 000-00-00 (связь: Telegram)"
+    ]
+
+
+def test_pricing_endpoint_gives_the_site_the_server_rates():
+    body = client.get("/api/pricing").json()
+    assert body["rates"] == {"support": 180, "deep": 320, "repair": 400}
+    assert set(body["labels"]) == set(body["rates"])
+    assert (body["min_area"], body["max_area"]) == (10, 500)
+
+
+def test_browser_of_the_public_site_is_allowed_by_cors_but_other_sites_are_not():
+    def preflight(origin):
+        return client.options(
+            "/api/public-requests",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+
+    allowed = preflight("https://lakoniya.ru")
+    assert allowed.status_code == 200
+    assert allowed.headers["access-control-allow-origin"] == "https://lakoniya.ru"
+    assert "access-control-allow-origin" not in preflight("https://evil.example").headers
+
+
+def test_sliding_window_limiter_forgets_old_hits_and_bounds_memory():
+    limiter = api.SlidingWindowLimiter(2, 60, max_keys=3)
+    assert limiter.allow("a", now=0) and limiter.allow("a", now=1)
+    assert not limiter.allow("a", now=2)
+    assert limiter.allow("a", now=61)  # the first hit has expired
+    for key in ("b", "c", "d", "e"):
+        limiter.allow(key, now=100)
+    assert len(limiter._hits) <= 3
+
+
+def test_client_ip_prefers_forwarded_header_and_falls_back_to_socket():
+    class FakeRequest:
+        def __init__(self, headers, host):
+            self.headers = headers
+            self.client = type("C", (), {"host": host})() if host else None
+
+    assert api.client_ip(FakeRequest({"x-forwarded-for": "203.0.113.5, 10.0.0.1"}, "10.0.0.2")) == "203.0.113.5"
+    assert api.client_ip(FakeRequest({}, "10.0.0.2")) == "10.0.0.2"
+    assert api.client_ip(FakeRequest({}, None)) == "unknown"
+
+
 def test_existing_database_without_the_column_is_migrated(monkeypatch, tmp_path):
     import sqlite3
 
@@ -543,7 +787,7 @@ def test_existing_database_without_the_column_is_migrated(monkeypatch, tmp_path)
     with sqlite3.connect(old_db) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(requests)")}
         kept = connection.execute("SELECT service, customer_telegram_id FROM requests").fetchall()
-    assert {"customer_telegram_id", "estimated_amount"} <= columns
+    assert {"customer_telegram_id", "estimated_amount", "source"} <= columns
     assert kept == [("Старая", None)]
 
 

@@ -103,6 +103,7 @@
       const pill = element('span', 'pill' + (request.status === 'Новая' ? ' pending' : ''), request.status);
       top.append(title, pill);
       card.append(top);
+      addField(card, 'Источник', request.source === 'site' ? 'Сайт' : 'Telegram-бот');
       addField(card, 'Услуга', request.service);
       addField(card, 'Адрес', request.address);
       addField(card, 'Желаемое время', request.preferred_time);
