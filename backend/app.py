@@ -156,9 +156,11 @@ def verify_telegram_init_data(init_data: str, bot_token: str) -> dict:
     data_check_string = "\n".join(
         f"{key}={value}" for key, value in sorted(parsed.items())
     )
-    # Telegram Web Apps: secret_key = HMAC_SHA256(key=bot_token, msg="WebAppData")
+    # Telegram Mini Apps: the constant "WebAppData" is the KEY and the bot token is
+    # the MESSAGE (shell equivalent: printf %s "$TOKEN" | openssl dgst -sha256 -hmac WebAppData).
+    # Reversing them rejects every genuine initData; see test_known_vector_*.
     secret_key = hmac.new(
-        bot_token.encode("utf-8"), b"WebAppData", hashlib.sha256
+        b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256
     ).digest()
     expected_hash = hmac.new(
         secret_key, data_check_string.encode("utf-8"), hashlib.sha256

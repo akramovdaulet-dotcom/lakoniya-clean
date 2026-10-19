@@ -17,6 +17,8 @@ os.environ["ALLOWED_ORIGINS"] = "https://lakoniya-miniapp-test.pages.dev"
 os.environ["NOTIFY_OWNERS"] = "false"
 
 import httpx
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -37,7 +39,7 @@ def signed_init_data(
         "user": json.dumps({"id": user_id, "first_name": "Test"}, separators=(",", ":")),
     }
     check_string = "\n".join(f"{k}={v}" for k, v in sorted(fields.items()))
-    secret_key = hmac.new(token.encode(), b"WebAppData", hashlib.sha256).digest()
+    secret_key = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
     fields["hash"] = hmac.new(
         secret_key, check_string.encode(), hashlib.sha256
     ).hexdigest()
@@ -281,6 +283,35 @@ def test_synthetic_request_notification_is_marked_as_test(monkeypatch):
     assert response.status_code == 201
     assert len(texts) == 2
     assert all("ТЕСТОВАЯ заявка" in text for text in texts)
+
+
+# Reference values computed independently with openssl, NOT with this app's code:
+#   SK=$(printf %s "$TOKEN" | openssl dgst -sha256 -hmac WebAppData)   # key = "WebAppData"
+#   printf %s "$DATA_CHECK_STRING" | openssl dgst -sha256 -mac HMAC -macopt hexkey:$SK
+# This guards against swapping the key and message again, which makes the app
+# reject genuine Telegram initData while the self-signing test helper still passes.
+KNOWN_TOKEN = "123456:TEST-TOKEN-not-real"
+KNOWN_FIELDS = {
+    "auth_date": "1700000000",
+    "query_id": "AAtest",
+    "user": '{"id":42,"first_name":"T"}',
+}
+KNOWN_HASH = "afb5e824bb9ae89f70403d8dbc2b4f1bf833f5dc23d1b6787262181b5bc765e1"
+KNOWN_HASH_WITH_SWAPPED_KEY = "7fc381744695e20cd71e682d4089a4173c384e4eb4400b9a5cdddf4759f88698"
+
+
+def test_known_vector_from_openssl_is_accepted(monkeypatch):
+    monkeypatch.setattr(api.time, "time", lambda: 1700000010)
+    init_data = urlencode({**KNOWN_FIELDS, "hash": KNOWN_HASH})
+    assert api.verify_telegram_init_data(init_data, KNOWN_TOKEN)["id"] == 42
+
+
+def test_known_vector_with_swapped_key_and_message_is_rejected(monkeypatch):
+    monkeypatch.setattr(api.time, "time", lambda: 1700000010)
+    init_data = urlencode({**KNOWN_FIELDS, "hash": KNOWN_HASH_WITH_SWAPPED_KEY})
+    with pytest.raises(HTTPException) as error:
+        api.verify_telegram_init_data(init_data, KNOWN_TOKEN)
+    assert error.value.status_code == 401
 
 
 def test_owner_bot_signature_cannot_create_customer_request():
