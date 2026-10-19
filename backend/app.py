@@ -107,9 +107,9 @@ def verify_telegram_init_data(init_data: str, bot_token: str) -> dict:
 
     parsed = dict(parse_qsl(init_data, keep_blank_values=True))
     received_hash = parsed.pop("hash", None)
-    # For bot-token HMAC validation, include all fields except `hash`.
-    # The optional `signature` field is excluded only from the separate
-    # third-party Ed25519 validation data-check-string.
+    # Telegram HMAC validation excludes both `hash` and the optional
+    # Ed25519 `signature` field; signature is for third-party validation only.
+    parsed.pop("signature", None)
     if not received_hash:
         import logging
         logging.getLogger("lakoniya.telegram_auth").warning(
