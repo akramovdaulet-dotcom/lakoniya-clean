@@ -3,15 +3,18 @@ import hmac
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
+from collections import deque
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl
 
 import httpx
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 def clean_token(value: str) -> str:
     """Strip whitespace, newlines and wrapping quotes pasted into a host's env UI.
@@ -46,6 +49,16 @@ ALLOWED_ORIGINS = [
     ).split(",")
     if value.strip()
 ]
+# Origins of the public website that submits requests directly (no Telegram involved).
+# Merged with ALLOWED_ORIGINS, so existing hosting settings keep working.
+SITE_ORIGINS = [
+    value.strip()
+    for value in os.environ.get(
+        "SITE_ORIGINS",
+        "https://lakoniya.ru,https://www.lakoniya.ru,https://akramovdaulet-dotcom.github.io",
+    ).split(",")
+    if value.strip()
+]
 INIT_DATA_MAX_AGE_SECONDS = 3600
 ALLOWED_STATUSES = {
     "Новая",
@@ -60,7 +73,7 @@ ALLOWED_STATUSES = {
 app = FastAPI(title="Lakoniya Clean API", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=list(dict.fromkeys(ALLOWED_ORIGINS + SITE_ORIGINS)),
     # Permit this project's Cloudflare Pages preview deployments as well as
     # the stable production origin, without allowing arbitrary websites.
     allow_origin_regex=r"https://(?:[a-z0-9-]+\.)?lakoniya-miniapp-test\.pages\.dev",
@@ -118,6 +131,9 @@ def initialize_db():
         add_column_if_missing(db, "requests", "customer_telegram_id", "BIGINT")
         # Preliminary amount in rubles, computed on the server (NULL = not calculated).
         add_column_if_missing(db, "requests", "estimated_amount", "BIGINT")
+        # Where the request came from: 'site' (public website form) or 'bot' (Telegram
+        # Mini App). NULL on rows created before this column existed (those came from the bot).
+        add_column_if_missing(db, "requests", "source", "TEXT")
 
 
 def add_column_if_missing(db, table: str, column: str, column_type: str) -> None:
@@ -254,6 +270,16 @@ def format_amount(amount) -> str:
     return f"{amount:,}".replace(",", " ") + " ₽"
 
 
+# Service names shown to owners; keys match SERVICE_RATES and the forms' <select> values.
+SERVICE_LABELS = {
+    "support": "Поддерживающая уборка",
+    "deep": "Генеральная уборка",
+    "repair": "Уборка после ремонта",
+}
+CONTACT_CHANNELS = {"Telegram", "MAX", "Телефон", "Электронная почта", "Любой способ"}
+PHONE_ALLOWED = re.compile(r"\+?[0-9 ()\-]+")
+
+
 class RequestCreate(BaseModel):
     service: str = Field(min_length=1, max_length=100)
     address: str = Field(min_length=1, max_length=300)
@@ -264,6 +290,127 @@ class RequestCreate(BaseModel):
     # (such requests simply have no amount).
     service_code: str | None = Field(default=None, max_length=20)
     area: int | None = Field(default=None, ge=MIN_AREA, le=MAX_AREA)
+
+
+def collapse_spaces(value: str) -> str:
+    """Single-line text: newlines, tabs and repeated spaces become single spaces."""
+    return " ".join(str(value).split())
+
+
+class PublicRequestCreate(BaseModel):
+    """Request submitted from the public website (no Telegram login)."""
+
+    name: str = Field(min_length=2, max_length=80)
+    phone: str = Field(min_length=5, max_length=30)
+    channel: str = Field(default="Любой способ", max_length=30)
+    service_code: str = Field(max_length=20)
+    area: int = Field(ge=MIN_AREA, le=MAX_AREA)
+    district: str = Field(default="", max_length=60)
+    address: str = Field(min_length=3, max_length=300)
+    preferred_date: str = Field(min_length=10, max_length=10)
+    notes: str = Field(default="", max_length=1000)
+    consent: bool  # required: a missing value is rejected too
+    website: str = Field(default="", max_length=200)  # honeypot: real visitors never fill it
+
+    @field_validator("name", "address", "district", "channel", mode="before")
+    @classmethod
+    def _single_line(cls, value):
+        return collapse_spaces(value) if isinstance(value, str) else value
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def _phone(cls, value):
+        value = collapse_spaces(value) if isinstance(value, str) else value
+        if not isinstance(value, str) or not PHONE_ALLOWED.fullmatch(value):
+            raise ValueError("phone may contain only digits, +, spaces, brackets and dashes")
+        if not 10 <= sum(ch.isdigit() for ch in value) <= 15:
+            raise ValueError("phone must contain 10 to 15 digits")
+        return value
+
+    @field_validator("channel")
+    @classmethod
+    def _channel(cls, value):
+        if value not in CONTACT_CHANNELS:
+            raise ValueError("unsupported contact channel")
+        return value
+
+    @field_validator("service_code")
+    @classmethod
+    def _service_code(cls, value):
+        if value not in SERVICE_RATES:
+            raise ValueError("unknown service")
+        return value
+
+    @field_validator("preferred_date")
+    @classmethod
+    def _preferred_date(cls, value):
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError:
+            raise ValueError("date must be YYYY-MM-DD") from None
+        today = datetime.now(timezone.utc).date()
+        # One day of slack for time zones ahead of UTC (Ufa is UTC+5).
+        if not today - timedelta(days=1) <= parsed <= today + timedelta(days=365):
+            raise ValueError("date must be within the next year")
+        return parsed.isoformat()
+
+    @field_validator("consent")
+    @classmethod
+    def _consent(cls, value):
+        if value is not True:
+            raise ValueError("consent to personal data processing is required")
+        return value
+
+
+class SlidingWindowLimiter:
+    """In-memory request counter per key. Resets on restart; fine for a single instance."""
+
+    def __init__(self, limit: int, window_seconds: int, max_keys: int = 5000):
+        self.limit, self.window, self.max_keys = limit, window_seconds, max_keys
+        self._hits: dict[str, deque] = {}
+
+    def allow(self, key: str, now: float | None = None) -> bool:
+        now = time.monotonic() if now is None else now
+        hits = self._hits.get(key)
+        if hits is None:
+            if len(self._hits) >= self.max_keys:
+                self._prune(now)
+            hits = self._hits[key] = deque()
+        while hits and now - hits[0] >= self.window:
+            hits.popleft()
+        if len(hits) >= self.limit:
+            return False
+        hits.append(now)
+        return True
+
+    def _prune(self, now: float) -> None:
+        self._hits = {k: h for k, h in self._hits.items() if h and now - h[-1] < self.window}
+        if len(self._hits) >= self.max_keys:
+            self._hits.clear()  # under attack: forget everyone rather than grow without bound
+
+    def reset(self) -> None:
+        self._hits.clear()
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except ValueError:
+        return default
+
+
+# Per visitor and overall caps for the public form (requests per hour).
+ip_limiter = SlidingWindowLimiter(_env_int("PUBLIC_RATE_LIMIT_PER_HOUR", 5), 3600)
+global_limiter = SlidingWindowLimiter(_env_int("PUBLIC_RATE_LIMIT_GLOBAL_PER_HOUR", 60), 3600)
+
+
+def client_ip(request) -> str:
+    """Visitor address behind the hosting proxy. X-Forwarded-For can be forged by a
+    determined attacker, which is why global_limiter exists as a backstop."""
+    first = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    if first:
+        return first[:64]
+    return request.client.host if request.client else "unknown"
 
 
 class StatusUpdate(BaseModel):
@@ -284,14 +431,22 @@ def format_request_notification(
     notes: str,
     *,
     estimated_amount=None,
+    source: str = "bot",
     synthetic: bool = False,
 ) -> str:
     """Plain-text message for owners; no parse_mode, so customer text cannot inject markup."""
 
     def clip(value: str, limit: int = 300) -> str:
-        return (value or "").strip()[:limit] or "—"
+        # One line per field: a newline in customer text must not be able to fake
+        # an extra line such as "Сумма: 1 ₽" in the owner's message.
+        return collapse_spaces(value or "")[:limit] or "—"
 
-    title = "🧪 ТЕСТОВАЯ заявка" if synthetic else "🧹 Новая заявка"
+    if synthetic:
+        title = "🧪 ТЕСТОВАЯ заявка"
+    elif source == "site":
+        title = "🌐 Новая заявка с сайта"
+    else:
+        title = "🧹 Новая заявка"
     return "\n".join(
         [
             f"{title} №{request_id}",
@@ -396,7 +551,90 @@ def health():
         "configured": bool(OWNER_BOT_TOKEN and OWNER_IDS),
         "customer_app_configured": bool(CUSTOMER_BOT_TOKEN),
         "database_backend": "postgres" if USE_POSTGRES else "sqlite",
+        # Short git commit of the running deploy (set by Render), to see which code is live.
+        "version": os.environ.get("RENDER_GIT_COMMIT", "")[:7] or "dev",
     }
+
+
+@app.get("/api/pricing")
+def pricing():
+    """Rates the website uses for its live estimate, so site and server never disagree."""
+    return {
+        "rates": SERVICE_RATES,
+        "labels": SERVICE_LABELS,
+        "min_area": MIN_AREA,
+        "max_area": MAX_AREA,
+    }
+
+
+@app.post("/api/public-requests", status_code=201)
+def create_public_request(
+    payload: PublicRequestCreate, request: Request, background_tasks: BackgroundTasks
+):
+    """Request from the public website: stored, then sent to the owners' Telegram bot."""
+    if not ip_limiter.allow(client_ip(request)) or not global_limiter.allow("all"):
+        notify_logger.warning("Public request rejected: rate limit")
+        raise HTTPException(
+            status_code=429,
+            detail="Too many requests, try again later",
+            headers={"Retry-After": "3600"},
+        )
+    if payload.website.strip():
+        # Honeypot filled: pretend success so the bot learns nothing, store nothing.
+        notify_logger.info("Public request ignored: honeypot field filled")
+        return {"id": 0, "status": "Новая"}
+
+    amount = estimate_amount(payload.service_code, payload.area)
+    address = (f"{payload.district}, " if payload.district else "") + (
+        f"{payload.address} ({payload.area} м²)"
+    )
+    contact = f"{payload.name}, {payload.phone} (связь: {payload.channel})"
+    note = payload.notes.strip()
+    notes = (note + " · " if note else "") + "Согласие на обработку данных подтверждено на сайте."
+    now = int(time.time())
+    with connect_db() as db:
+        # A retry after a timeout or a double click must not create a second request.
+        duplicate = execute_db(
+            db,
+            """SELECT id FROM requests
+               WHERE source = 'site' AND customer_contact = ? AND address = ?
+                 AND preferred_time = ? AND created_at > ?
+               ORDER BY id DESC LIMIT 1""",
+            (contact, address, payload.preferred_date, now - 600),
+        ).fetchone()
+        if duplicate is not None:
+            return {"id": duplicate["id"], "status": "Новая"}
+        request_id = execute_db(
+            db,
+            """INSERT INTO requests
+               (service, address, preferred_time, customer_contact, notes, status,
+                created_at, customer_telegram_id, estimated_amount, source)
+               VALUES (?, ?, ?, ?, ?, 'Новая', ?, NULL, ?, 'site')""",
+            (
+                SERVICE_LABELS[payload.service_code],
+                address,
+                payload.preferred_date,
+                contact,
+                notes,
+                now,
+                amount,
+            ),
+            returning_id=True,
+        )
+    background_tasks.add_task(
+        notify_owners,
+        format_request_notification(
+            request_id,
+            SERVICE_LABELS[payload.service_code],
+            address,
+            payload.preferred_date,
+            contact,
+            notes,
+            estimated_amount=amount,
+            source="site",
+        ),
+    )
+    return {"id": request_id, "status": "Новая"}
 
 
 @app.post("/api/requests", status_code=201)
@@ -412,8 +650,8 @@ def create_request(
             db,
             """INSERT INTO requests
                (service, address, preferred_time, customer_contact, notes, status,
-                created_at, customer_telegram_id, estimated_amount)
-               VALUES (?, ?, ?, ?, ?, 'Новая', ?, ?, ?)""",
+                created_at, customer_telegram_id, estimated_amount, source)
+               VALUES (?, ?, ?, ?, ?, 'Новая', ?, ?, ?, 'bot')""",
             (
                 payload.service,
                 payload.address,
@@ -457,8 +695,8 @@ def create_synthetic_test_request(
             db,
             """INSERT INTO requests
                (service, address, preferred_time, customer_contact, notes, status,
-                created_at, customer_telegram_id, estimated_amount)
-               VALUES (?, ?, ?, ?, ?, 'Новая', ?, ?, ?)""",
+                created_at, customer_telegram_id, estimated_amount, source)
+               VALUES (?, ?, ?, ?, ?, 'Новая', ?, ?, ?, 'bot')""",
             (
                 "ТЕСТ — поддерживающая уборка",
                 "ТЕСТОВЫЙ АДРЕС — не использовать",
@@ -499,7 +737,7 @@ def list_requests(_: dict = Depends(owner_user)):
         rows = execute_db(
             db,
             """SELECT id, service, address, preferred_time, customer_contact,
-                      notes, status, created_at, estimated_amount
+                      notes, status, created_at, estimated_amount, source
                FROM requests ORDER BY created_at DESC LIMIT 500"""
         ).fetchall()
     return {"requests": [dict(row) for row in rows]}

@@ -11,7 +11,16 @@ FastAPI backend for the Telegram customer Mini App and owner panel. It is still 
 - CORS is restricted to configured HTTPS origins. CORS is not authentication; server-side signature validation and the owner allowlist provide authentication/authorization.
 - SQLite requires persistent storage. Render's local filesystem may be ephemeral; do not store real customer data there without a persistent disk or managed database.
 
+## Public website requests
+
+The website (`index.html` in the repository root) submits requests without Telegram login to `POST /api/public-requests`. The server validates the data, computes the preliminary amount from `SERVICE_RATES` (never from the browser), stores the request with `source = 'site'` and sends it to every `OWNER_TELEGRAM_IDS` user through the owner bot. `GET /api/pricing` gives the site the same rates.
+
+Abuse protection, because this endpoint is open to the internet: a hidden honeypot field, a per-visitor and an overall hourly request limit (in memory, reset on restart, based on `X-Forwarded-For`, which a determined attacker can forge — hence the overall cap), duplicate suppression for retries within 10 minutes, strict field validation and single-line sanitising of text sent to owners. Customers who order on the site have no Telegram chat with the customer bot, so they receive no status messages; the owner contacts them using the details in the request.
+
 ## Hosting environment variables
+
+- `SITE_ORIGINS`: browser origins of the public website, merged with `ALLOWED_ORIGINS` (defaults to `lakoniya.ru`, `www.lakoniya.ru` and the GitHub Pages address).
+- `PUBLIC_RATE_LIMIT_PER_HOUR` / `PUBLIC_RATE_LIMIT_GLOBAL_PER_HOUR`: public form limits per visitor and overall (defaults 5 and 60).
 
 - `OWNER_BOT_TOKEN`: owner bot token (recommended).
 - `TELEGRAM_BOT_TOKEN`: backwards-compatible fallback for the owner bot token.
