@@ -532,7 +532,7 @@ def format_request_notification(
     )
 
 
-def notify_owners(text: str) -> None:
+def notify_owners(text: str, photos: list[str] | None = None) -> None:
     """Send `text` to every owner through the owner bot.
 
     Runs after the response is sent. Failures are logged without the bot token
@@ -560,6 +560,26 @@ def notify_owners(text: str) -> None:
             notify_logger.warning(
                 "Owner notification rejected: owner_id=%d status=%d", chat_id, response.status_code
             )
+            continue
+        for index, photo in enumerate(photos or [], start=1):
+            try:
+                header, encoded = photo.split(",", 1)
+                mime = header[5:].split(";", 1)[0]
+                raw = base64.b64decode(encoded, validate=True)
+                photo_response = httpx.post(
+                    f"{TELEGRAM_API_URL}/bot{OWNER_BOT_TOKEN}/sendPhoto",
+                    data={"chat_id": chat_id, "caption": f"Фото загрязнения {index}/{len(photos or [])}"},
+                    files={"photo": (f"dirty-area-{index}", raw, mime)},
+                    timeout=20,
+                )
+            except (httpx.HTTPError, ValueError, base64.binascii.Error) as exc:
+                notify_logger.warning("Owner photo notification failed: %s", type(exc).__name__)
+                continue
+            if photo_response.status_code != 200:
+                notify_logger.warning(
+                    "Owner photo notification rejected: owner_id=%d status=%d",
+                    chat_id, photo_response.status_code
+                )
 
 
 NOTIFY_CUSTOMERS = os.environ.get("NOTIFY_CUSTOMERS", "true").strip().lower() != "false"
@@ -704,6 +724,7 @@ def create_public_request(
             additional_services=payload.additional_services,
             source="site",
         ),
+        payload.dirty_area_photos,
     )
     return {"id": request_id, "status": "Новая"}
 
