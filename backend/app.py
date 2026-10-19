@@ -322,6 +322,29 @@ class RequestCreate(BaseModel):
     additional_services: dict[str, int] = Field(default_factory=dict)
     dirty_area_photos: list[str] = Field(default_factory=list, max_length=5)
 
+    @field_validator("dirty_area_photos")
+    @classmethod
+    def validate_dirty_area_photos(cls, value):
+        allowed = {"image/jpeg", "image/png", "image/webp"}
+        total_bytes = 0
+        for photo in value:
+            if not isinstance(photo, str) or "," not in photo:
+                raise ValueError("photos must be base64 data URLs")
+            header, encoded = photo.split(",", 1)
+            mime = header.removeprefix("data:").removesuffix(";base64")
+            if mime not in allowed or not header.endswith(";base64"):
+                raise ValueError("photos must be JPEG, PNG or WebP")
+            try:
+                decoded = base64.b64decode(encoded, validate=True)
+            except (ValueError, base64.binascii.Error):
+                raise ValueError("invalid photo encoding")
+            if not decoded or len(decoded) > 5 * 1024 * 1024:
+                raise ValueError("each photo must be no larger than 5 MB")
+            total_bytes += len(decoded)
+        if total_bytes > 20 * 1024 * 1024:
+            raise ValueError("photos total must be no larger than 20 MB")
+        return value
+
     @field_validator("additional_services")
     @classmethod
     def validate_additional_services(cls, value):
