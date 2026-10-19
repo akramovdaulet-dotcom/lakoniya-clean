@@ -134,6 +134,8 @@ def initialize_db():
         # Where the request came from: 'site' (public website form) or 'bot' (Telegram
         # Mini App). NULL on rows created before this column existed (those came from the bot).
         add_column_if_missing(db, "requests", "source", "TEXT")
+        # JSON snapshot of selected extra services and quantities.
+        add_column_if_missing(db, "requests", "additional_services_json", "TEXT")
         add_column_if_missing(db, "requests", "additional_services_json", "TEXT")
 
 
