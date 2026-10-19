@@ -1,20 +1,36 @@
 import hashlib
 import hmac
 import json
+import logging
 import os
 import sqlite3
 import time
 from pathlib import Path
 from urllib.parse import parse_qsl
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+import httpx
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+def clean_token(value: str) -> str:
+    """Strip whitespace, newlines and wrapping quotes pasted into a host's env UI.
+
+    A stray space, line break or quote changes the HMAC key and makes every
+    Telegram signature check fail even though the token itself is correct.
+    """
+    value = (value or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1].strip()
+    return value
+
+
 # Owner and customer Mini Apps belong to different Telegram bots and must use
 # separate tokens. TELEGRAM_BOT_TOKEN remains a backwards-compatible owner token.
-OWNER_BOT_TOKEN = os.environ.get("OWNER_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CUSTOMER_BOT_TOKEN = os.environ.get("CUSTOMER_BOT_TOKEN", "")
+OWNER_BOT_TOKEN = clean_token(
+    os.environ.get("OWNER_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+)
+CUSTOMER_BOT_TOKEN = clean_token(os.environ.get("CUSTOMER_BOT_TOKEN", ""))
 OWNER_IDS = {
     int(value.strip())
     for value in os.environ.get("OWNER_TELEGRAM_IDS", "").split(",")
@@ -107,9 +123,9 @@ def verify_telegram_init_data(init_data: str, bot_token: str) -> dict:
 
     parsed = dict(parse_qsl(init_data, keep_blank_values=True))
     received_hash = parsed.pop("hash", None)
-    # Telegram HMAC validation excludes both `hash` and the optional
-    # Ed25519 `signature` field; signature is for third-party validation only.
-    parsed.pop("signature", None)
+    # For bot-token HMAC validation, include all fields except `hash`.
+    # The optional `signature` field is excluded only from the separate
+    # third-party Ed25519 validation data-check-string, so it stays here.
     if not received_hash:
         import logging
         logging.getLogger("lakoniya.telegram_auth").warning(
@@ -140,9 +156,11 @@ def verify_telegram_init_data(init_data: str, bot_token: str) -> dict:
     data_check_string = "\n".join(
         f"{key}={value}" for key, value in sorted(parsed.items())
     )
-    # Telegram Web Apps: secret_key = HMAC_SHA256(key=bot_token, msg="WebAppData")
+    # Telegram Mini Apps: the constant "WebAppData" is the KEY and the bot token is
+    # the MESSAGE (shell equivalent: printf %s "$TOKEN" | openssl dgst -sha256 -hmac WebAppData).
+    # Reversing them rejects every genuine initData; see test_known_vector_*.
     secret_key = hmac.new(
-        bot_token.encode("utf-8"), b"WebAppData", hashlib.sha256
+        b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256
     ).digest()
     expected_hash = hmac.new(
         secret_key, data_check_string.encode("utf-8"), hashlib.sha256
@@ -206,6 +224,69 @@ class StatusUpdate(BaseModel):
     status: str
 
 
+NOTIFY_OWNERS = os.environ.get("NOTIFY_OWNERS", "true").strip().lower() != "false"
+TELEGRAM_API_URL = "https://api.telegram.org"
+notify_logger = logging.getLogger("lakoniya.notify")
+
+
+def format_request_notification(
+    request_id: int,
+    service: str,
+    address: str,
+    preferred_time: str,
+    customer_contact: str,
+    notes: str,
+    *,
+    synthetic: bool = False,
+) -> str:
+    """Plain-text message for owners; no parse_mode, so customer text cannot inject markup."""
+
+    def clip(value: str, limit: int = 300) -> str:
+        return (value or "").strip()[:limit] or "—"
+
+    title = "🧪 ТЕСТОВАЯ заявка" if synthetic else "🧹 Новая заявка"
+    return "\n".join(
+        [
+            f"{title} №{request_id}",
+            f"Услуга: {clip(service)}",
+            f"Адрес: {clip(address)}",
+            f"Когда: {clip(preferred_time, 100)}",
+            f"Контакт: {clip(customer_contact)}",
+            f"Комментарий: {clip(notes, 500)}",
+        ]
+    )
+
+
+def notify_owners(text: str) -> None:
+    """Send `text` to every owner through the owner bot.
+
+    Runs after the response is sent. Failures are logged without the bot token
+    or any customer data and never affect the stored request.
+    """
+    if not NOTIFY_OWNERS:
+        return
+    if not OWNER_BOT_TOKEN or not OWNER_IDS:
+        notify_logger.warning("Owner notification skipped: owner bot or owner ids not configured")
+        return
+    url = f"{TELEGRAM_API_URL}/bot{OWNER_BOT_TOKEN}/sendMessage"
+    for chat_id in sorted(OWNER_IDS):
+        try:
+            response = httpx.post(
+                url,
+                json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
+                timeout=10,
+            )
+        except httpx.HTTPError as exc:
+            # Log only the exception class: httpx messages can include the request URL (token).
+            notify_logger.warning("Owner notification failed: %s", type(exc).__name__)
+            continue
+        if response.status_code != 200:
+            # 403 usually means the owner has not pressed Start in the owner bot yet.
+            notify_logger.warning(
+                "Owner notification rejected: owner_id=%d status=%d", chat_id, response.status_code
+            )
+
+
 @app.get("/health")
 def health():
     return {
@@ -217,7 +298,11 @@ def health():
 
 
 @app.post("/api/requests", status_code=201)
-def create_request(payload: RequestCreate, user: dict = Depends(customer_user)):
+def create_request(
+    payload: RequestCreate,
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(customer_user),
+):
     # Customer Mini App must send initData signed by the customer bot's token.
     with connect_db() as db:
         request_id = execute_db(
@@ -235,11 +320,24 @@ def create_request(payload: RequestCreate, user: dict = Depends(customer_user)):
             ),
             returning_id=True,
         )
+    background_tasks.add_task(
+        notify_owners,
+        format_request_notification(
+            request_id,
+            payload.service,
+            payload.address,
+            payload.preferred_time,
+            payload.customer_contact,
+            payload.notes,
+        ),
+    )
     return {"id": request_id, "status": "Новая"}
 
 
 @app.post("/api/test-requests", status_code=201)
-def create_synthetic_test_request(user: dict = Depends(customer_user)):
+def create_synthetic_test_request(
+    background_tasks: BackgroundTasks, user: dict = Depends(customer_user)
+):
     """Create a fixed synthetic request for end-to-end checks; never store form data."""
     if os.environ.get("ENABLE_SYNTHETIC_TEST_REQUESTS", "").lower() != "true":
         raise HTTPException(status_code=503, detail="Synthetic test requests are disabled")
@@ -259,6 +357,18 @@ def create_synthetic_test_request(user: dict = Depends(customer_user)):
             ),
             returning_id=True,
         )
+    background_tasks.add_task(
+        notify_owners,
+        format_request_notification(
+            request_id,
+            "ТЕСТ — поддерживающая уборка",
+            "ТЕСТОВЫЙ АДРЕС — не использовать",
+            "2099-01-01",
+            "ТЕСТОВЫЙ КОНТАКТ — не использовать",
+            "SYNTHETIC_TEST_REQUEST",
+            synthetic=True,
+        ),
+    )
     return {"id": request_id, "status": "Новая", "synthetic": True}
 
 

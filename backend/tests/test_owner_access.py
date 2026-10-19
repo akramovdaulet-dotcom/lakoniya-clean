@@ -13,7 +13,12 @@ os.environ["CUSTOMER_BOT_TOKEN"] = "customer-test-token-not-for-production"
 os.environ["OWNER_TELEGRAM_IDS"] = "547686782,1086767973"
 os.environ["DATABASE_PATH"] = "/tmp/lakoniya-test.sqlite3"
 os.environ["ALLOWED_ORIGINS"] = "https://lakoniya-miniapp-test.pages.dev"
+# Tests must never call the real Telegram API; notification tests enable it explicitly.
+os.environ["NOTIFY_OWNERS"] = "false"
 
+import httpx
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -34,7 +39,7 @@ def signed_init_data(
         "user": json.dumps({"id": user_id, "first_name": "Test"}, separators=(",", ":")),
     }
     check_string = "\n".join(f"{k}={v}" for k, v in sorted(fields.items()))
-    secret_key = hmac.new(token.encode(), b"WebAppData", hashlib.sha256).digest()
+    secret_key = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
     fields["hash"] = hmac.new(
         secret_key, check_string.encode(), hashlib.sha256
     ).hexdigest()
@@ -160,6 +165,168 @@ def test_customer_can_create_request_with_customer_bot_signature():
     assert response.status_code == 201
     assert response.json()["status"] == "Новая"
     assert isinstance(response.json()["id"], int)
+
+
+def test_clean_token_strips_whitespace_newlines_and_quotes():
+    assert api.clean_token("abc:123") == "abc:123"
+    assert api.clean_token("  abc:123\n") == "abc:123"
+    assert api.clean_token('"abc:123"') == "abc:123"
+    assert api.clean_token("'abc:123'\r\n") == "abc:123"
+    assert api.clean_token(' " abc:123 " ') == "abc:123"
+    assert api.clean_token("") == ""
+    assert api.clean_token(None) == ""
+
+
+def test_customer_request_works_when_env_token_had_stray_whitespace(monkeypatch):
+    real_token = os.environ["CUSTOMER_BOT_TOKEN"]
+    # Simulates a hosting env value pasted with quotes and a trailing newline.
+    monkeypatch.setattr(api, "CUSTOMER_BOT_TOKEN", api.clean_token(f'"{real_token}"\n'))
+    response = client.post(
+        "/api/requests",
+        json={
+            "service": "Тест",
+            "address": "Тестовый адрес",
+            "preferred_time": "2099-01-01",
+            "customer_contact": "Тестовый контакт",
+        },
+        headers={
+            "X-Telegram-Init-Data": signed_init_data(123456789, bot_token=real_token)
+        },
+    )
+    assert response.status_code == 201
+
+
+CUSTOMER_PAYLOAD = {
+    "service": "Генеральная уборка",
+    "address": "ул. Тестовая, 1",
+    "preferred_time": "2099-01-01",
+    "customer_contact": "Тест · +70000000000",
+    "notes": "Автоматический тест",
+}
+
+
+def customer_headers():
+    return {
+        "X-Telegram-Init-Data": signed_init_data(
+            123456789, bot_token=os.environ["CUSTOMER_BOT_TOKEN"]
+        )
+    }
+
+
+class FakeResponse:
+    def __init__(self, status_code=200):
+        self.status_code = status_code
+
+
+def test_new_request_is_sent_to_every_owner_via_owner_bot(monkeypatch):
+    calls = []
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append((url, json))
+        return FakeResponse(200)
+
+    monkeypatch.setattr(api, "NOTIFY_OWNERS", True)
+    monkeypatch.setattr(api.httpx, "post", fake_post)
+    response = client.post("/api/requests", json=CUSTOMER_PAYLOAD, headers=customer_headers())
+    assert response.status_code == 201
+    assert sorted(call[1]["chat_id"] for call in calls) == [547686782, 1086767973]
+    for url, body in calls:
+        assert url == (
+            "https://api.telegram.org/bot"
+            + os.environ["TELEGRAM_BOT_TOKEN"]
+            + "/sendMessage"
+        )
+        assert f"№{response.json()['id']}" in body["text"]
+        assert "Генеральная уборка" in body["text"]
+        assert "parse_mode" not in body
+
+
+def test_notification_failure_does_not_break_request_creation(monkeypatch):
+    def failing_post(url, json=None, timeout=None):
+        raise httpx.ConnectError("boom " + url)
+
+    monkeypatch.setattr(api, "NOTIFY_OWNERS", True)
+    monkeypatch.setattr(api.httpx, "post", failing_post)
+    response = client.post("/api/requests", json=CUSTOMER_PAYLOAD, headers=customer_headers())
+    assert response.status_code == 201
+
+
+def test_rejected_notification_log_never_contains_bot_token(monkeypatch, caplog):
+    monkeypatch.setattr(api, "NOTIFY_OWNERS", True)
+    monkeypatch.setattr(api.httpx, "post", lambda url, json=None, timeout=None: FakeResponse(403))
+    with caplog.at_level("WARNING", logger="lakoniya.notify"):
+        response = client.post("/api/requests", json=CUSTOMER_PAYLOAD, headers=customer_headers())
+    assert response.status_code == 201
+    assert "status=403" in caplog.text
+    assert os.environ["TELEGRAM_BOT_TOKEN"] not in caplog.text
+
+
+def test_notifications_can_be_turned_off(monkeypatch):
+    calls = []
+    monkeypatch.setattr(api, "NOTIFY_OWNERS", False)
+    monkeypatch.setattr(api.httpx, "post", lambda *a, **k: calls.append(1))
+    response = client.post("/api/requests", json=CUSTOMER_PAYLOAD, headers=customer_headers())
+    assert response.status_code == 201
+    assert calls == []
+
+
+def test_synthetic_request_notification_is_marked_as_test(monkeypatch):
+    texts = []
+    monkeypatch.setenv("ENABLE_SYNTHETIC_TEST_REQUESTS", "true")
+    monkeypatch.setattr(api, "NOTIFY_OWNERS", True)
+    monkeypatch.setattr(
+        api.httpx,
+        "post",
+        lambda url, json=None, timeout=None: texts.append(json["text"]) or FakeResponse(200),
+    )
+    response = client.post("/api/test-requests", headers=customer_headers())
+    assert response.status_code == 201
+    assert len(texts) == 2
+    assert all("ТЕСТОВАЯ заявка" in text for text in texts)
+
+
+# Reference values computed independently with openssl, NOT with this app's code:
+#   SK=$(printf %s "$TOKEN" | openssl dgst -sha256 -hmac WebAppData)   # key = "WebAppData"
+#   printf %s "$DATA_CHECK_STRING" | openssl dgst -sha256 -mac HMAC -macopt hexkey:$SK
+# This guards against swapping the key and message again, which makes the app
+# reject genuine Telegram initData while the self-signing test helper still passes.
+KNOWN_TOKEN = "123456:TEST-TOKEN-not-real"
+KNOWN_FIELDS = {
+    "auth_date": "1700000000",
+    "query_id": "AAtest",
+    "user": '{"id":42,"first_name":"T"}',
+}
+KNOWN_HASH = "afb5e824bb9ae89f70403d8dbc2b4f1bf833f5dc23d1b6787262181b5bc765e1"
+KNOWN_HASH_WITH_SWAPPED_KEY = "7fc381744695e20cd71e682d4089a4173c384e4eb4400b9a5cdddf4759f88698"
+
+
+def test_known_vector_from_openssl_is_accepted(monkeypatch):
+    monkeypatch.setattr(api.time, "time", lambda: 1700000010)
+    init_data = urlencode({**KNOWN_FIELDS, "hash": KNOWN_HASH})
+    assert api.verify_telegram_init_data(init_data, KNOWN_TOKEN)["id"] == 42
+
+
+def test_known_vector_with_signature_field_included_is_accepted(monkeypatch):
+    # Telegram's `signature` field is part of the bot-token HMAC data-check-string;
+    # only `hash` is excluded. Hash computed with openssl over the string that
+    # includes `signature=SigTest_abc-123`.
+    monkeypatch.setattr(api.time, "time", lambda: 1700000010)
+    init_data = urlencode(
+        {
+            **KNOWN_FIELDS,
+            "signature": "SigTest_abc-123",
+            "hash": "56a61af1b995dca5f70d1e2dbde04c8f6533b64371b75bb806ba3087f70bf3e8",
+        }
+    )
+    assert api.verify_telegram_init_data(init_data, KNOWN_TOKEN)["id"] == 42
+
+
+def test_known_vector_with_swapped_key_and_message_is_rejected(monkeypatch):
+    monkeypatch.setattr(api.time, "time", lambda: 1700000010)
+    init_data = urlencode({**KNOWN_FIELDS, "hash": KNOWN_HASH_WITH_SWAPPED_KEY})
+    with pytest.raises(HTTPException) as error:
+        api.verify_telegram_init_data(init_data, KNOWN_TOKEN)
+    assert error.value.status_code == 401
 
 
 def test_owner_bot_signature_cannot_create_customer_request():
