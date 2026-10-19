@@ -39,7 +39,7 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     # Permit this project's Cloudflare Pages preview deployments as well as
     # the stable production origin, without allowing arbitrary websites.
-    allow_origin_regex=r"https://(?:[a-z0-9-]+\\.)?lakoniya-miniapp-test\\.pages\\.dev",
+    allow_origin_regex=r"https://(?:[a-z0-9-]+\.)?lakoniya-miniapp-test\.pages\.dev",
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
     allow_headers=["Content-Type", "X-Telegram-Init-Data"],
