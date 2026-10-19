@@ -134,6 +134,7 @@ def initialize_db():
         # Where the request came from: 'site' (public website form) or 'bot' (Telegram
         # Mini App). NULL on rows created before this column existed (those came from the bot).
         add_column_if_missing(db, "requests", "source", "TEXT")
+        add_column_if_missing(db, "requests", "additional_services_json", "TEXT")
 
 
 def add_column_if_missing(db, table: str, column: str, column_type: str) -> None:
@@ -316,6 +317,12 @@ class RequestCreate(BaseModel):
     # (such requests simply have no amount).
     service_code: str | None = Field(default=None, max_length=20)
     area: int | None = Field(default=None, ge=MIN_AREA, le=MAX_AREA)
+    additional_services: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("additional_services")
+    @classmethod
+    def validate_additional_services(cls, value):
+        return normalize_additional_services(value)
 
 
 def collapse_spaces(value: str) -> str:
@@ -337,6 +344,12 @@ class PublicRequestCreate(BaseModel):
     notes: str = Field(default="", max_length=1000)
     consent: bool  # required: a missing value is rejected too
     website: str = Field(default="", max_length=200)  # honeypot: real visitors never fill it
+    additional_services: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("additional_services")
+    @classmethod
+    def validate_additional_services(cls, value):
+        return normalize_additional_services(value)
 
     @field_validator("name", "address", "district", "channel", mode="before")
     @classmethod
@@ -588,6 +601,7 @@ def pricing():
     return {
         "rates": SERVICE_RATES,
         "labels": SERVICE_LABELS,
+        "additional_services": {k: {"label": ADDITIONAL_SERVICE_LABELS[k], "rate": v, "unit": ADDITIONAL_SERVICE_UNITS[k], "max_quantity": ADDITIONAL_SERVICE_MAX[k]} for k, v in ADDITIONAL_SERVICE_RATES.items()},
         "min_area": MIN_AREA,
         "max_area": MAX_AREA,
     }
