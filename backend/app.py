@@ -676,7 +676,6 @@ def create_public_request(
             notes,
             estimated_amount=amount,
             additional_services=payload.additional_services,
-            additional_services=payload.additional_services,
             source="site",
         ),
     )
@@ -722,6 +721,7 @@ def create_request(
             payload.customer_contact,
             payload.notes,
             estimated_amount=amount,
+            additional_services=payload.additional_services,
         ),
     )
     background_tasks.add_task(
