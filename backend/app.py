@@ -470,6 +470,7 @@ def format_request_notification(
     notes: str,
     *,
     estimated_amount=None,
+    additional_services=None,
     source: str = "bot",
     synthetic: bool = False,
 ) -> str:
@@ -499,6 +500,7 @@ def format_request_notification(
                 else "не рассчитана"
             ),
             f"Контакт: {clip(customer_contact)}",
+            *(["Доп. услуги: " + "; ".join(ADDITIONAL_SERVICE_LABELS[k] + " × " + str(v) + " " + ADDITIONAL_SERVICE_UNITS[k] + " = " + format_amount(ADDITIONAL_SERVICE_RATES[k] * v) for k, v in normalize_additional_services(additional_services).items())] if additional_services else []),
             f"Комментарий: {clip(notes, 500)}",
         ]
     )
@@ -624,7 +626,8 @@ def create_public_request(
         notify_logger.info("Public request ignored: honeypot field filled")
         return {"id": 0, "status": "Новая"}
 
-    amount = estimate_amount(payload.service_code, payload.area)
+    amount = estimate_amount(payload.service_code, payload.area, payload.additional_services)
+    extras_json = json.dumps(payload.additional_services, ensure_ascii=False, sort_keys=True)
     address = (f"{payload.district}, " if payload.district else "") + (
         f"{payload.address} ({payload.area} м²)"
     )
@@ -648,8 +651,8 @@ def create_public_request(
             db,
             """INSERT INTO requests
                (service, address, preferred_time, customer_contact, notes, status,
-                created_at, customer_telegram_id, estimated_amount, source)
-               VALUES (?, ?, ?, ?, ?, 'Новая', ?, NULL, ?, 'site')""",
+                created_at, customer_telegram_id, estimated_amount, source, additional_services_json)
+               VALUES (?, ?, ?, ?, ?, 'Новая', ?, NULL, ?, 'site', ?)""",
             (
                 SERVICE_LABELS[payload.service_code],
                 address,
@@ -658,6 +661,7 @@ def create_public_request(
                 notes,
                 now,
                 amount,
+                extras_json,
             ),
             returning_id=True,
         )
@@ -684,14 +688,15 @@ def create_request(
     user: dict = Depends(customer_user),
 ):
     # Customer Mini App must send initData signed by the customer bot's token.
-    amount = estimate_amount(payload.service_code, payload.area)
+    amount = estimate_amount(payload.service_code, payload.area, payload.additional_services)
+    extras_json = json.dumps(payload.additional_services, ensure_ascii=False, sort_keys=True)
     with connect_db() as db:
         request_id = execute_db(
             db,
             """INSERT INTO requests
                (service, address, preferred_time, customer_contact, notes, status,
-                created_at, customer_telegram_id, estimated_amount, source)
-               VALUES (?, ?, ?, ?, ?, 'Новая', ?, ?, ?, 'bot')""",
+                created_at, customer_telegram_id, estimated_amount, source, additional_services_json)
+               VALUES (?, ?, ?, ?, ?, 'Новая', ?, ?, ?, 'bot', ?)""",
             (
                 payload.service,
                 payload.address,
@@ -701,6 +706,7 @@ def create_request(
                 int(time.time()),
                 user["id"],
                 amount,
+                extras_json,
             ),
             returning_id=True,
         )
