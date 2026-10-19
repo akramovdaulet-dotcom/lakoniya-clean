@@ -88,6 +88,7 @@ footer{border-top:1px solid var(--line);padding:25px 0;color:var(--muted);font-s
 </div>
 <div class="field"><label for="address">Адрес уборки *</label><input id="address" name="address" autocomplete="street-address" maxlength="300" placeholder="Улица, дом, квартира"></div>
 <div class="field"><label for="date">Желаемая дата *</label><input id="date" name="preferred_date" type="date"></div>
+<div class="field"><label for="dirtyPhotos">Фото загрязнённых участков (необязательно, до 5 фото)</label><input id="dirtyPhotos" type="file" accept="image/jpeg,image/png,image/webp" multiple><p class="muted">Пришлите до 5 фото в формате JPG, PNG или WebP, каждое до 5 МБ. Стоимость этих участков вручную оценит менеджер.</p><p class="msg err hidden" id="photoError" role="alert"></p></div>
 <div class="field"><label for="details">Комментарий</label><textarea id="details" name="notes" rows="3" maxlength="1000" placeholder="Например: есть питомцы, нужно мытьё окон"></textarea></div>
 <div class="hp" aria-hidden="true"><label>Не заполняйте это поле <input id="website" name="website" tabindex="-1" autocomplete="off"></label></div>
 <label class="consent"><input id="consent" name="consent" type="checkbox"><span>Согласен(на) на обработку персональных данных (имя, телефон, адрес) для связи по заявке. *</span></label>
@@ -206,6 +207,28 @@ $('#requestForm').addEventListener('submit', async event => {
   event.preventDefault();
   const payload = validate();
   if (!payload) return;
+  const photoInput = $('#dirtyPhotos');
+  const selectedPhotos = Array.from(photoInput.files || []);
+  if (selectedPhotos.length > 5) {
+    show($('#photoError'), 'Можно прикрепить не больше 5 фотографий.');
+    return;
+  }
+  hide($('#photoError'));
+  if (selectedPhotos.some(file => !['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024)) {
+    show($('#photoError'), 'Используйте JPG, PNG или WebP. Размер каждого фото не должен превышать 5 МБ.');
+    return;
+  }
+  try {
+    payload.dirty_area_photos = await Promise.all(selectedPhotos.map(file => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error('Не удалось прочитать фото'));
+      reader.readAsDataURL(file);
+    })));
+  } catch (_) {
+    show($('#photoError'), 'Не удалось прочитать фотографии. Выберите их ещё раз.');
+    return;
+  }
   const button = $('#submit');
   button.disabled = true; button.textContent = 'Отправляем…';
   const slow = setTimeout(() => show($('#status'), 'Сервер просыпается, это может занять до минуты. Не закрывайте страницу…'), 6000);
