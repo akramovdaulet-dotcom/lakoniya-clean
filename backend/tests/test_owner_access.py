@@ -306,6 +306,21 @@ def test_known_vector_from_openssl_is_accepted(monkeypatch):
     assert api.verify_telegram_init_data(init_data, KNOWN_TOKEN)["id"] == 42
 
 
+def test_known_vector_with_signature_field_included_is_accepted(monkeypatch):
+    # Telegram's `signature` field is part of the bot-token HMAC data-check-string;
+    # only `hash` is excluded. Hash computed with openssl over the string that
+    # includes `signature=SigTest_abc-123`.
+    monkeypatch.setattr(api.time, "time", lambda: 1700000010)
+    init_data = urlencode(
+        {
+            **KNOWN_FIELDS,
+            "signature": "SigTest_abc-123",
+            "hash": "56a61af1b995dca5f70d1e2dbde04c8f6533b64371b75bb806ba3087f70bf3e8",
+        }
+    )
+    assert api.verify_telegram_init_data(init_data, KNOWN_TOKEN)["id"] == 42
+
+
 def test_known_vector_with_swapped_key_and_message_is_rejected(monkeypatch):
     monkeypatch.setattr(api.time, "time", lambda: 1700000010)
     init_data = urlencode({**KNOWN_FIELDS, "hash": KNOWN_HASH_WITH_SWAPPED_KEY})

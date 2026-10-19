@@ -23,20 +23,21 @@ def make_init_data(*, token=TEST_TOKEN, include_signature=False, user_name="Daul
             separators=(",", ":"),
         ),
     }
+    if include_signature:
+        # Telegram adds `signature` (for third-party Ed25519 checks). It is part of
+        # the bot-token HMAC data-check-string: only `hash` is excluded there.
+        fields["signature"] = "test-ed25519-signature"
     data_check_string = "\n".join(
         f"{key}={value}" for key, value in sorted(fields.items())
     )
-    # Telegram Web Apps bot-token validation:
-    # secret_key = HMAC_SHA256(key=bot_token, msg="WebAppData")
+    # Telegram Mini Apps bot-token validation: the constant "WebAppData" is the
+    # HMAC key and the bot token is the message.
     secret_key = hmac.new(
-        token.encode("utf-8"), b"WebAppData", hashlib.sha256
+        b"WebAppData", token.encode("utf-8"), hashlib.sha256
     ).digest()
     fields["hash"] = hmac.new(
         secret_key, data_check_string.encode("utf-8"), hashlib.sha256
     ).hexdigest()
-    if include_signature:
-        # This unrelated Ed25519 signature must not enter the HMAC check string.
-        fields["signature"] = "test-ed25519-signature"
     return urlencode(fields)
 
 
@@ -46,11 +47,19 @@ def test_valid_init_data_passes_hmac_verification():
     assert result["user"]["first_name"] == "Daulet"
 
 
-def test_optional_ed25519_signature_does_not_change_hmac_validation():
+def test_signature_field_is_part_of_hmac_data_check_string():
     result = app.verify_telegram_init_data(
         make_init_data(include_signature=True), TEST_TOKEN
     )
     assert result["id"] == 123456789
+
+
+def test_tampered_signature_field_fails_hmac_verification():
+    data = make_init_data(include_signature=True)
+    tampered = data.replace("test-ed25519-signature", "forged-signature")
+    with pytest.raises(HTTPException) as error:
+        app.verify_telegram_init_data(tampered, TEST_TOKEN)
+    assert error.value.status_code == 401
 
 
 def test_tampered_user_data_fails_hmac_verification():
@@ -77,7 +86,7 @@ def test_expired_init_data_is_rejected():
         f"{key}={value}" for key, value in sorted(fields.items())
     )
     secret_key = hmac.new(
-        TEST_TOKEN.encode("utf-8"), b"WebAppData", hashlib.sha256
+        b"WebAppData", TEST_TOKEN.encode("utf-8"), hashlib.sha256
     ).digest()
     fields["hash"] = hmac.new(
         secret_key, data_check_string.encode("utf-8"), hashlib.sha256
