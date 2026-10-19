@@ -1,5 +1,5 @@
 """Regression tests for server-side additional cleaning service pricing."""
-from app import (
+from backend.app import (
     ADDITIONAL_SERVICE_RATES,
     estimate_amount,
     format_request_notification,
