@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import hmac
 import json
@@ -319,6 +320,7 @@ class RequestCreate(BaseModel):
     service_code: str | None = Field(default=None, max_length=20)
     area: int | None = Field(default=None, ge=MIN_AREA, le=MAX_AREA)
     additional_services: dict[str, int] = Field(default_factory=dict)
+    dirty_area_photos: list[str] = Field(default_factory=list, max_length=5)
 
     @field_validator("additional_services")
     @classmethod
