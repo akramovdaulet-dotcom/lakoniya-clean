@@ -1,5 +1,15 @@
 """Regression tests for server-side additional cleaning service pricing."""
-from backend.app import (
+try:
+    # The backend workflow runs pytest with backend/ as its working directory.
+    from app import (
+        ADDITIONAL_SERVICE_RATES,
+        estimate_amount,
+        format_request_notification,
+        normalize_additional_services,
+    )
+except ModuleNotFoundError:
+    # Also support running the suite from the repository root.
+    from backend.app import (
     ADDITIONAL_SERVICE_RATES,
     estimate_amount,
     format_request_notification,
