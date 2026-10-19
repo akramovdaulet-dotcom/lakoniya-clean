@@ -13,7 +13,10 @@ os.environ["CUSTOMER_BOT_TOKEN"] = "customer-test-token-not-for-production"
 os.environ["OWNER_TELEGRAM_IDS"] = "547686782,1086767973"
 os.environ["DATABASE_PATH"] = "/tmp/lakoniya-test.sqlite3"
 os.environ["ALLOWED_ORIGINS"] = "https://lakoniya-miniapp-test.pages.dev"
+# Tests must never call the real Telegram API; notification tests enable it explicitly.
+os.environ["NOTIFY_OWNERS"] = "false"
 
+import httpx
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -189,6 +192,95 @@ def test_customer_request_works_when_env_token_had_stray_whitespace(monkeypatch)
         },
     )
     assert response.status_code == 201
+
+
+CUSTOMER_PAYLOAD = {
+    "service": "Генеральная уборка",
+    "address": "ул. Тестовая, 1",
+    "preferred_time": "2099-01-01",
+    "customer_contact": "Тест · +70000000000",
+    "notes": "Автоматический тест",
+}
+
+
+def customer_headers():
+    return {
+        "X-Telegram-Init-Data": signed_init_data(
+            123456789, bot_token=os.environ["CUSTOMER_BOT_TOKEN"]
+        )
+    }
+
+
+class FakeResponse:
+    def __init__(self, status_code=200):
+        self.status_code = status_code
+
+
+def test_new_request_is_sent_to_every_owner_via_owner_bot(monkeypatch):
+    calls = []
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append((url, json))
+        return FakeResponse(200)
+
+    monkeypatch.setattr(api, "NOTIFY_OWNERS", True)
+    monkeypatch.setattr(api.httpx, "post", fake_post)
+    response = client.post("/api/requests", json=CUSTOMER_PAYLOAD, headers=customer_headers())
+    assert response.status_code == 201
+    assert sorted(call[1]["chat_id"] for call in calls) == [547686782, 1086767973]
+    for url, body in calls:
+        assert url == (
+            "https://api.telegram.org/bot"
+            + os.environ["TELEGRAM_BOT_TOKEN"]
+            + "/sendMessage"
+        )
+        assert f"№{response.json()['id']}" in body["text"]
+        assert "Генеральная уборка" in body["text"]
+        assert "parse_mode" not in body
+
+
+def test_notification_failure_does_not_break_request_creation(monkeypatch):
+    def failing_post(url, json=None, timeout=None):
+        raise httpx.ConnectError("boom " + url)
+
+    monkeypatch.setattr(api, "NOTIFY_OWNERS", True)
+    monkeypatch.setattr(api.httpx, "post", failing_post)
+    response = client.post("/api/requests", json=CUSTOMER_PAYLOAD, headers=customer_headers())
+    assert response.status_code == 201
+
+
+def test_rejected_notification_log_never_contains_bot_token(monkeypatch, caplog):
+    monkeypatch.setattr(api, "NOTIFY_OWNERS", True)
+    monkeypatch.setattr(api.httpx, "post", lambda url, json=None, timeout=None: FakeResponse(403))
+    with caplog.at_level("WARNING", logger="lakoniya.notify"):
+        response = client.post("/api/requests", json=CUSTOMER_PAYLOAD, headers=customer_headers())
+    assert response.status_code == 201
+    assert "status=403" in caplog.text
+    assert os.environ["TELEGRAM_BOT_TOKEN"] not in caplog.text
+
+
+def test_notifications_can_be_turned_off(monkeypatch):
+    calls = []
+    monkeypatch.setattr(api, "NOTIFY_OWNERS", False)
+    monkeypatch.setattr(api.httpx, "post", lambda *a, **k: calls.append(1))
+    response = client.post("/api/requests", json=CUSTOMER_PAYLOAD, headers=customer_headers())
+    assert response.status_code == 201
+    assert calls == []
+
+
+def test_synthetic_request_notification_is_marked_as_test(monkeypatch):
+    texts = []
+    monkeypatch.setenv("ENABLE_SYNTHETIC_TEST_REQUESTS", "true")
+    monkeypatch.setattr(api, "NOTIFY_OWNERS", True)
+    monkeypatch.setattr(
+        api.httpx,
+        "post",
+        lambda url, json=None, timeout=None: texts.append(json["text"]) or FakeResponse(200),
+    )
+    response = client.post("/api/test-requests", headers=customer_headers())
+    assert response.status_code == 201
+    assert len(texts) == 2
+    assert all("ТЕСТОВАЯ заявка" in text for text in texts)
 
 
 def test_owner_bot_signature_cannot_create_customer_request():
