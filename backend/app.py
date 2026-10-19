@@ -136,7 +136,6 @@ def initialize_db():
         add_column_if_missing(db, "requests", "source", "TEXT")
         # JSON snapshot of selected extra services and quantities.
         add_column_if_missing(db, "requests", "additional_services_json", "TEXT")
-        add_column_if_missing(db, "requests", "additional_services_json", "TEXT")
 
 
 def add_column_if_missing(db, table: str, column: str, column_type: str) -> None:
