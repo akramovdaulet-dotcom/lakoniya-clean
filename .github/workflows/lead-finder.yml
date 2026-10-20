@@ -37,7 +37,7 @@ jobs:
         env:
           FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
         run: |
-          python -m lead_finder.agent --limit "${{ inputs.limit }}" --include-seen --output lead-finder-results.json --state .lead-finder-seen.json
+          python -m lead_finder.agent --limit "${{ inputs.limit || '5' }}" --include-seen --output lead-finder-results.json --state .lead-finder-seen.json
       - name: Upload lead report
         if: always()
         uses: actions/upload-artifact@v4
