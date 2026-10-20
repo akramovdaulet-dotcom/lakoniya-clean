@@ -555,54 +555,50 @@ def format_request_notification(
     )
 
 
-def notify_owners(text: str, photos: list[str] | None = None) -> None:
-    """Send `text` to every owner through the owner bot.
-
-    Runs after the response is sent. Failures are logged without the bot token
-    or any customer data and never affect the stored request.
-    """
+def notify_owners(text: str, photos: list[str] | None = None, request_id: int | None = None) -> None:
+    """Send owner notification and photos; logs never include tokens or file contents."""
     if not NOTIFY_OWNERS:
         return
     if not OWNER_BOT_TOKEN or not OWNER_IDS:
         notify_logger.warning("Owner notification skipped: owner bot or owner ids not configured")
         return
-    url = f"{TELEGRAM_API_URL}/bot{OWNER_BOT_TOKEN}/sendMessage"
+    photos = photos or []
     for chat_id in sorted(OWNER_IDS):
         try:
-            response = httpx.post(
-                url,
-                json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
-                timeout=10,
-            )
-        except httpx.HTTPError as exc:
-            # Log only the exception class: httpx messages can include the request URL (token).
-            notify_logger.warning("Owner notification failed: %s", type(exc).__name__)
-            continue
-        if response.status_code != 200:
-            # 403 usually means the owner has not pressed Start in the owner bot yet.
-            notify_logger.warning(
-                "Owner notification rejected: owner_id=%d status=%d", chat_id, response.status_code
-            )
-            continue
-        for index, photo in enumerate(photos or [], start=1):
-            try:
+            response = httpx.post(f"{TELEGRAM_API_URL}/bot{OWNER_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True}, timeout=10)
+            if response.status_code != 200:
+                notify_logger.warning("Owner notification rejected: owner_id=%d status=%d", chat_id, response.status_code)
+                continue
+            if not photos:
+                continue
+            media, files = [], {}
+            for index, photo in enumerate(photos, start=1):
                 header, encoded = photo.split(",", 1)
                 mime = header[5:].split(";", 1)[0]
                 raw = base64.b64decode(encoded, validate=True)
-                photo_response = httpx.post(
-                    f"{TELEGRAM_API_URL}/bot{OWNER_BOT_TOKEN}/sendPhoto",
-                    data={"chat_id": chat_id, "caption": f"Фото загрязнения {index}/{len(photos or [])}"},
-                    files={"photo": (f"dirty-area-{index}", raw, mime)},
-                    timeout=20,
-                )
-            except (httpx.HTTPError, ValueError, base64.binascii.Error) as exc:
-                notify_logger.warning("Owner photo notification failed: %s", type(exc).__name__)
-                continue
+                filename = f"dirty-area-{index}.jpg"
+                media.append({"type": "photo", "media": f"attach://{filename}", "caption": f"Заявка №{request_id} · фото {index}/{len(photos)}"})
+                files[filename] = (filename, raw, mime)
+            if len(media) == 1:
+                filename = next(iter(files))
+                photo_response = httpx.post(f"{TELEGRAM_API_URL}/bot{OWNER_BOT_TOKEN}/sendPhoto",
+                    data={"chat_id": chat_id, "caption": f"Заявка №{request_id} · фото 1/1"},
+                    files={"photo": files[filename]}, timeout=25)
+            else:
+                photo_response = httpx.post(f"{TELEGRAM_API_URL}/bot{OWNER_BOT_TOKEN}/sendMediaGroup",
+                    data={"chat_id": chat_id, "media": json.dumps(media, ensure_ascii=False)}, files=files, timeout=30)
             if photo_response.status_code != 200:
-                notify_logger.warning(
-                    "Owner photo notification rejected: owner_id=%d status=%d",
-                    chat_id, photo_response.status_code
-                )
+                notify_logger.warning("Owner photos rejected: request_id=%s status=%d", request_id, photo_response.status_code)
+                httpx.post(f"{TELEGRAM_API_URL}/bot{OWNER_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": chat_id, "text": f"Фото к заявке №{request_id} не удалось доставить, свяжитесь с клиентом"}, timeout=10)
+        except (httpx.HTTPError, ValueError, base64.binascii.Error) as exc:
+            notify_logger.warning("Owner photo delivery failed: request_id=%s reason=%s", request_id, type(exc).__name__)
+            try:
+                httpx.post(f"{TELEGRAM_API_URL}/bot{OWNER_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": chat_id, "text": f"Фото к заявке №{request_id} не удалось доставить, свяжитесь с клиентом"}, timeout=10)
+            except httpx.HTTPError:
+                pass
 
 
 NOTIFY_CUSTOMERS = os.environ.get("NOTIFY_CUSTOMERS", "true").strip().lower() != "false"
