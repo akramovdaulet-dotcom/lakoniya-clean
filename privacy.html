@@ -19,6 +19,7 @@ p,li{margin:8px 0}
 ul{padding-left:22px}
 .muted{color:var(--muted);font-size:14px}
 .card{background:#fff;border:1px solid var(--line);border-radius:16px;padding:18px 20px;margin:16px 0}
+.hidden{display:none}
 .todo{background:#fdecea;border:1px solid #f3c3bd;color:#7a1f14;border-radius:8px;padding:1px 6px;font-weight:700}
 a{color:#1d6b57}
 :focus-visible{outline:3px solid #2f7d68;outline-offset:2px}
@@ -34,7 +35,7 @@ footer{border-top:1px solid var(--line);padding:25px 0;color:var(--muted);font-s
 <div class="card">
 <b>Оператор персональных данных:</b>
 <span id="operatorName"></span>, физическое лицо, оказывающее услуги по уборке в г. Уфе.<br>
-<b>Почта для обращений:</b> <span id="operatorEmail"></span>
+<b>Контакты для обращений:</b> <span id="operatorPhone"></span> (телефон, Telegram, MAX)<span id="emailLine" class="hidden">, почта <span id="operatorEmail"></span></span>
 </div>
 
 <h2>1. Какие данные мы получаем</h2>
@@ -74,7 +75,7 @@ footer{border-top:1px solid var(--line);padding:25px 0;color:var(--muted);font-s
 <p>Заявки хранятся не дольше <b>12 месяцев</b> с момента создания, затем удаляются автоматически. Фотографии из переписки в Telegram владельцы удаляют не позднее этого же срока. Мы можем удалить данные раньше по вашему запросу.</p>
 
 <h2>6. Ваши права</h2>
-<p>Вы вправе: узнать, какие ваши данные мы обрабатываем; потребовать их уточнения, блокирования или удаления; отозвать согласие. Для этого напишите на почту, указанную выше, и укажите имя и телефон из заявки. Мы ответим в срок, установленный законом (до 10 рабочих дней). Если вы считаете, что ваши права нарушены, вы можете обратиться в Роскомнадзор.</p>
+<p>Вы вправе: узнать, какие ваши данные мы обрабатываем; потребовать их уточнения, блокирования или удаления; отозвать согласие. Для этого свяжитесь с оператором по контактам, указанным выше, и назовите имя и телефон из заявки. Мы ответим в срок, установленный законом (до 10 рабочих дней). Если вы считаете, что ваши права нарушены, вы можете обратиться в Роскомнадзор.</p>
 
 <h2>7. Безопасность</h2>
 <p>Данные передаются по защищённому соединению (HTTPS). Доступ к заявкам есть только у владельцев, их проверяет сервер по идентификатору Telegram. Токены и ключи хранятся в настройках сервера, а не в коде сайта.</p>
@@ -87,15 +88,16 @@ footer{border-top:1px solid var(--line);padding:25px 0;color:var(--muted);font-s
 <footer><div class="wrap">Лакония Клин · Клининг в Уфе</div></footer>
 <script>
 // Данные оператора заполняются здесь, в одном месте. Пока поле пустое, на странице видна красная пометка.
-const OPERATOR = { name: '', email: '', edition: '' };
+const OPERATOR = { name: 'Кошетова Гузеля А.', phone: '+7 (993) 366-92-28', email: '', edition: '20.10.2026' };
 function put(id, value, label) {
   const node = document.getElementById(id);
   if (value) { node.textContent = value; return; }
   node.textContent = label; node.className = 'todo';
 }
 put('operatorName', OPERATOR.name, '[ФИО — заполнить]');
-put('operatorEmail', OPERATOR.email, '[почта — заполнить]');
+put('operatorPhone', OPERATOR.phone, '[телефон — заполнить]');
 put('edition', OPERATOR.edition, '[дата — заполнить]');
+if (OPERATOR.email) { put('operatorEmail', OPERATOR.email, ''); document.getElementById('emailLine').classList.remove('hidden'); } // почта необязательна
 </script>
 </body>
 </html>
