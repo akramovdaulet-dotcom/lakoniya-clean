@@ -120,7 +120,7 @@ const FALLBACK = {
 };
 let pricing = FALLBACK;
 const $ = s => document.querySelector(s);
-const FIELD_NAMES = { name: 'имя', phone: 'телефон', channel: 'способ связи', service_code: 'тип уборки', area: 'площадь', district: 'район', address: 'адрес', preferred_date: 'дату', notes: 'комментарий', consent: 'согласие на обработку данных' };
+const FIELD_NAMES = { name: 'имя', phone: 'телефон', channel: 'способ связи', service_code: 'тип уборки', area: 'площадь', district: 'район', address: 'адрес', preferred_date: 'дату', notes: 'комментарий', consent: 'согласие на обработку данных', dirty_area_photos: 'фото' };
 
 function areaNumber() {
   const n = Math.round(Number($('#area').value));
@@ -190,16 +190,16 @@ function validate() {
     district: $('#district').value,
     preferred_date: $('#date').value,
     notes: $('#details').value.trim(),
-    dirty_area_photos: window.dirtyAreaPhotoData || [],
     consent: true,
     website: $('#website').value
   };
 }
 
 function messageFor(error) {
+  if (error && error.status === 413) return 'Фото слишком тяжёлые для отправки. Уберите часть фото или выберите меньше.';
   if (error && error.status === 429) return 'С вашего адреса отправлено слишком много заявок. Попробуйте позже.';
   if (error && error.status === 422 && Array.isArray(error.data && error.data.detail)) {
-    const names = [...new Set(error.data.detail.map(item => FIELD_NAMES[item.loc && item.loc[item.loc.length - 1]]).filter(Boolean))];
+    const names = [...new Set(error.data.detail.map(item => FIELD_NAMES[(item.loc || []).filter(part => typeof part === 'string').pop()]).filter(Boolean))];
     if (names.length) return 'Проверьте поля: ' + names.join(', ') + '.';
   }
   if (error && error.status) return 'Не удалось отправить заявку (ошибка ' + error.status + '). Попробуйте ещё раз чуть позже.';
@@ -210,6 +210,8 @@ let selectedDirtyPhotos = [];
 const photoInput = $('#dirtyPhotos');
 function renderPhotoPreviews() {
   const container = $('#photoPreviews');
+  $('label[for="dirtyPhotos"]').textContent = 'Фото загрязнённых участков (необязательно, до 5 фото)' +
+    (selectedDirtyPhotos.length ? ' — выбрано ' + selectedDirtyPhotos.length + ' из 5' + (selectedDirtyPhotos.length < 5 ? ', можно добавить ещё' : '') : '');
   container.replaceChildren();
   selectedDirtyPhotos.forEach((file, index) => {
     const card = document.createElement('div'); card.className = 'photo-preview';
@@ -217,24 +219,24 @@ function renderPhotoPreviews() {
     image.src = URL.createObjectURL(file);
     image.onload = () => URL.revokeObjectURL(image.src);
     const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Убрать';
-    remove.addEventListener('click', () => {
-      selectedDirtyPhotos.splice(index, 1);
-      const transfer = new DataTransfer();
-      selectedDirtyPhotos.forEach(item => transfer.items.add(item));
-      photoInput.files = transfer.files;
-      renderPhotoPreviews();
-    });
+    remove.addEventListener('click', () => { selectedDirtyPhotos.splice(index, 1); hide($('#photoError')); renderPhotoPreviews(); });
     card.append(image, remove); container.append(card);
   });
 }
+// Every pick ADDS to the list (phones often let you choose only one photo at a time).
 photoInput.addEventListener('change', () => {
   hide($('#photoError'));
   const chosen = Array.from(photoInput.files || []);
-  if (chosen.length > 5) { show($('#photoError'), 'Можно прикрепить не больше 5 фотографий.'); photoInput.value = ''; selectedDirtyPhotos = []; renderPhotoPreviews(); return; }
+  photoInput.value = ''; // lets the same file be picked again later
   if (chosen.some(file => !['image/jpeg','image/png','image/webp'].includes(file.type) || !file.size)) {
-    show($('#photoError'), 'Допустимы только JPEG, PNG или WebP.'); photoInput.value = ''; selectedDirtyPhotos = []; renderPhotoPreviews(); return;
+    show($('#photoError'), 'Допустимы только JPEG, PNG или WebP.'); return;
   }
-  selectedDirtyPhotos = chosen; renderPhotoPreviews();
+  const known = new Set(selectedDirtyPhotos.map(f => f.name + '|' + f.size + '|' + f.lastModified));
+  const fresh = chosen.filter(f => !known.has(f.name + '|' + f.size + '|' + f.lastModified));
+  const room = 5 - selectedDirtyPhotos.length;
+  if (fresh.length > room) show($('#photoError'), 'Можно прикрепить не больше 5 фотографий, лишние не добавлены.');
+  selectedDirtyPhotos = selectedDirtyPhotos.concat(fresh.slice(0, room));
+  renderPhotoPreviews();
 });
 function compressPhoto(file) {
   return new Promise((resolve, reject) => {
@@ -248,6 +250,7 @@ function compressPhoto(file) {
       canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
       const context = canvas.getContext('2d');
       if (!context) { reject(new Error('canvas unavailable')); return; }
+      context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height); // transparent PNG -> white, not black
       context.drawImage(image, 0, 0, canvas.width, canvas.height);
       canvas.toBlob(blob => {
         if (!blob) { reject(new Error('compression failed')); return; }
