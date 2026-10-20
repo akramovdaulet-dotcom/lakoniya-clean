@@ -309,6 +309,38 @@ CONTACT_CHANNELS = {"Telegram", "MAX", "Телефон", "Электронная
 PHONE_ALLOWED = re.compile(r"\+?[0-9 ()\-]+")
 
 
+MAX_PHOTO_BYTES = 3 * 1024 * 1024
+MAX_PHOTOS_TOTAL_BYTES = 10 * 1024 * 1024
+PHOTO_SIGNATURES = {
+    "image/jpeg": lambda data: data.startswith(bytes.fromhex("FFD8FF")),
+    "image/png": lambda data: data.startswith(bytes.fromhex("89504E470D0A1A0A")),
+    "image/webp": lambda data: len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP",
+}
+
+def validate_dirty_area_photos(value):
+    if len(value) > 5:
+        raise ValueError("no more than 5 photos are allowed")
+    total_bytes = 0
+    for photo in value:
+        if not isinstance(photo, str) or "," not in photo:
+            raise ValueError("photos must be base64 data URLs")
+        header, encoded = photo.split(",", 1)
+        mime = header.removeprefix("data:").removesuffix(";base64")
+        if mime not in PHOTO_SIGNATURES or not header.endswith(";base64"):
+            raise ValueError("photos must be JPEG, PNG or WebP")
+        try:
+            decoded = base64.b64decode(encoded, validate=True)
+        except (ValueError, base64.binascii.Error):
+            raise ValueError("invalid photo encoding") from None
+        if not decoded or len(decoded) > MAX_PHOTO_BYTES:
+            raise ValueError("each photo must be no larger than 3 MB")
+        if not PHOTO_SIGNATURES[mime](decoded):
+            raise ValueError("photo contents do not match the declared image type")
+        total_bytes += len(decoded)
+    if total_bytes > MAX_PHOTOS_TOTAL_BYTES:
+        raise ValueError("photos total must be no larger than 10 MB")
+    return value
+
 class RequestCreate(BaseModel):
     service: str = Field(min_length=1, max_length=100)
     address: str = Field(min_length=1, max_length=300)
@@ -324,26 +356,8 @@ class RequestCreate(BaseModel):
 
     @field_validator("dirty_area_photos")
     @classmethod
-    def validate_dirty_area_photos(cls, value):
-        allowed = {"image/jpeg", "image/png", "image/webp"}
-        total_bytes = 0
-        for photo in value:
-            if not isinstance(photo, str) or "," not in photo:
-                raise ValueError("photos must be base64 data URLs")
-            header, encoded = photo.split(",", 1)
-            mime = header.removeprefix("data:").removesuffix(";base64")
-            if mime not in allowed or not header.endswith(";base64"):
-                raise ValueError("photos must be JPEG, PNG or WebP")
-            try:
-                decoded = base64.b64decode(encoded, validate=True)
-            except (ValueError, base64.binascii.Error):
-                raise ValueError("invalid photo encoding")
-            if not decoded or len(decoded) > 5 * 1024 * 1024:
-                raise ValueError("each photo must be no larger than 5 MB")
-            total_bytes += len(decoded)
-        if total_bytes > 20 * 1024 * 1024:
-            raise ValueError("photos total must be no larger than 20 MB")
-        return value
+    def validate_dirty_area_photos_field(cls, value):
+        return validate_dirty_area_photos(value)
 
     @field_validator("additional_services")
     @classmethod
@@ -375,26 +389,8 @@ class PublicRequestCreate(BaseModel):
 
     @field_validator("dirty_area_photos")
     @classmethod
-    def validate_dirty_area_photos(cls, value):
-        allowed = {"image/jpeg", "image/png", "image/webp"}
-        total_bytes = 0
-        for photo in value:
-            if not isinstance(photo, str) or "," not in photo:
-                raise ValueError("photos must be base64 data URLs")
-            header, encoded = photo.split(",", 1)
-            mime = header.removeprefix("data:").removesuffix(";base64")
-            if mime not in allowed or not header.endswith(";base64"):
-                raise ValueError("photos must be JPEG, PNG or WebP")
-            try:
-                decoded = base64.b64decode(encoded, validate=True)
-            except (ValueError, base64.binascii.Error):
-                raise ValueError("invalid photo encoding")
-            if not decoded or len(decoded) > 5 * 1024 * 1024:
-                raise ValueError("each photo must be no larger than 5 MB")
-            total_bytes += len(decoded)
-        if total_bytes > 20 * 1024 * 1024:
-            raise ValueError("photos total must be no larger than 20 MB")
-        return value
+    def validate_dirty_area_photos_field(cls, value):
+        return validate_dirty_area_photos(value)
 
     @field_validator("additional_services")
     @classmethod
