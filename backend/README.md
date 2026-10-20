@@ -55,3 +55,7 @@ uvicorn app:app --host 127.0.0.1 --port 8000
 ```
 
 Do not enable real customer submissions until persistent storage, backups, request limits, the per-bot authentication flow, privacy/legal requirements, and live Telegram end-to-end behavior have been reviewed. Never paste a bot token into GitHub or this chat.
+
+## Статус заявки для клиента с сайта
+
+`POST /api/public-requests` возвращает `id` и секретный `token`. Сайт строит ссылку `#status=<id>-<token>`, а страница запрашивает `GET /api/public-requests/{id}/status?token=...` (только статус и текст, без персональных данных; неверный токен и несуществующая заявка дают одинаковый 404). Лимит запросов на посетителя: `PUBLIC_STATUS_LIMIT_PER_HOUR` (по умолчанию 120).
