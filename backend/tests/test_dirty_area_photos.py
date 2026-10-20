@@ -85,21 +85,19 @@ def public_payload(**overrides):
     return payload
 
 
-def test_public_request_sends_photo_group_and_owner_text(monkeypatch):
-    notifications = []
-    monkeypatch.setattr(app, "notify_owners", lambda text, photos=None, request_id=None: notifications.append((text, photos, request_id)))
+def test_public_request_with_photos_is_created_and_count_is_stored(monkeypatch):
+    monkeypatch.setattr(app, "NOTIFY_OWNERS", False)
     monkeypatch.setattr(app.ip_limiter, "allow", lambda key: True)
     monkeypatch.setattr(app.global_limiter, "allow", lambda key: True)
     client = TestClient(app.app)
+    phone = "+7900" + str(int(__import__("time").time()))[-7:]
     photos = [data_url(), data_url()]
-    response = client.post("/api/public-requests", json=public_payload(phone="+79001230003", dirty_area_photos=photos))
+    response = client.post("/api/public-requests", json=public_payload(phone=phone, dirty_area_photos=photos))
     assert response.status_code == 201, response.text
-    assert notifications
-    text, sent_photos, request_id = notifications[-1]
-    assert "Фото: 2 шт. (оценка вручную)" in text
-    assert sent_photos == photos
-    assert isinstance(request_id, int)
-
+    request_id = response.json()["id"]
+    with app.connect_db() as db:
+        row = db.execute("SELECT dirty_area_photo_count FROM requests WHERE id = ?", (request_id,)).fetchone()
+    assert row["dirty_area_photo_count"] == 2
 
 def test_owner_photo_notification_uses_media_group(monkeypatch):
     calls = []
