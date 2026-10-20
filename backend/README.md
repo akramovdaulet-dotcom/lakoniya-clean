@@ -20,6 +20,7 @@ Abuse protection, because this endpoint is open to the internet: a hidden honeyp
 ## Hosting environment variables
 
 - `SITE_ORIGINS`: browser origins of the public website, merged with `ALLOWED_ORIGINS` (defaults include the GitHub Pages address; add your own domain here once you have one).
+- `REQUEST_RETENTION_DAYS`: how long requests are stored before automatic deletion (default `365`, `0` turns the cleanup off). Keep it in line with the privacy policy.
 - `PUBLIC_RATE_LIMIT_PER_HOUR` / `PUBLIC_RATE_LIMIT_GLOBAL_PER_HOUR`: public form limits per visitor and overall (defaults 5 and 60).
 
 - `OWNER_BOT_TOKEN`: owner bot token (recommended).

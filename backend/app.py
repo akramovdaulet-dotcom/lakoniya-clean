@@ -159,6 +159,29 @@ def add_column_if_missing(db, table: str, column: str, column_type: str) -> None
 
 initialize_db()
 
+# Privacy policy promise: requests are kept for a limited time (0 turns the cleanup off).
+try:
+    REQUEST_RETENTION_DAYS = max(0, int(os.environ.get("REQUEST_RETENTION_DAYS", "365")))
+except ValueError:
+    REQUEST_RETENTION_DAYS = 365
+_last_purge = 0.0
+
+
+def purge_old_requests(now: float | None = None, *, force: bool = False) -> int:
+    """Delete requests older than REQUEST_RETENTION_DAYS. Runs at most once an hour unless forced."""
+    global _last_purge
+    now = time.time() if now is None else now
+    if REQUEST_RETENTION_DAYS <= 0 or (not force and now - _last_purge < 3600):
+        return 0
+    _last_purge = now
+    cutoff = int(now) - REQUEST_RETENTION_DAYS * 86400
+    with connect_db() as db:
+        cursor = execute_db(db, "DELETE FROM requests WHERE created_at < ?", (cutoff,))
+        return cursor.rowcount or 0
+
+
+purge_old_requests(force=True)
+
 
 def verify_telegram_init_data(init_data: str, bot_token: str) -> dict:
     if not bot_token:
