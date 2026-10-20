@@ -48,7 +48,8 @@ NEGATIVE_TERMS = (
     "вакансия", "вакансии", "ищем сотрудник", "требуется сотрудник",
     "требуется уборщица на работу", "работа уборщицей", "резюме",
     "устроиться уборщ", "зарплата уборщ", "обучение клинингу",
-    "купить оборудование", "франшиза клининга",
+    "купить оборудование", "франшиза клининга", "уборка снега", "снега",
+    "расчистка снега", "покос травы", "газонов от мусора", "спиливание веток",
 )
 TRACKING_KEYS = {"fbclid", "gclid", "yclid", "ref", "source", "utm_source", "utm_medium", "utm_campaign"}
 
@@ -93,10 +94,10 @@ def score_result(result: SearchResult) -> Lead | None:
 
     buying_hits = [term for term in BUYING_INTENT_TERMS if term in text]
     city_hit = any(term in text for term in ("уфа", "уфе", "уфы", "уфу")) or "ufa" in result.url.lower()
-    if not buying_hits:
+    if not buying_hits or not city_hit:
         return None
 
-    score = 45 + min(30, 10 * len(buying_hits)) + (15 if city_hit else 0)
+    score = 45 + min(30, 10 * len(buying_hits)) + 15
     reason_parts = ["есть признаки запроса услуги"]
     if city_hit:
         reason_parts.append("есть указание на Уфу")
