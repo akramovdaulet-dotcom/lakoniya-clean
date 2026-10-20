@@ -102,3 +102,8 @@ def test_status_polling_is_rate_limited(monkeypatch):
 def test_honeypot_returns_no_token(monkeypatch):
     created = create(monkeypatch, website="http://spam.example")
     assert created["id"] == 0 and "token" not in created
+
+
+def test_confirmed_status_says_we_come_to_the_customer():
+    text = app.PUBLIC_STATUS_TEXT["Подтверждена"]
+    assert "приедем" in text and "ждём вас" not in text.lower()
