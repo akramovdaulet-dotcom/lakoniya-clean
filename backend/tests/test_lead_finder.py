@@ -229,3 +229,17 @@ def test_rejects_cleaning_directory_with_ad_count():
         description="Сколько стоит уборка квартиры в Уфе? Уборка квартиры стоит от 3000 рублей.",
     ))
     assert lead["status"] == "Отклонён"
+
+
+def test_summary_does_not_claim_direct_source_access():
+    class FakeSearcher:
+        def search(self, query, limit):
+            return []
+
+    report = run_search(FakeSearcher(), queries=(("telegram", "empty"),))
+    summary = report["summary"]
+    assert summary["sources_with_successful_queries"] == 1
+    assert summary["sources_with_results"] == []
+    assert summary["sources_with_no_results"] == ["Telegram"]
+    assert summary["sources_directly_verified"] == 0
+    assert summary["direct_page_fetch_performed"] is False
