@@ -1,6 +1,11 @@
 name: Find Ufa cleaning leads
 
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "backend/lead_finder/**"
+      - ".github/workflows/lead-finder.yml"
   workflow_dispatch:
     inputs:
       limit:
