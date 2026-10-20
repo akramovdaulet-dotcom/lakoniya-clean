@@ -137,6 +137,7 @@ def initialize_db():
         add_column_if_missing(db, "requests", "source", "TEXT")
         # JSON snapshot of selected extra services and quantities.
         add_column_if_missing(db, "requests", "additional_services_json", "TEXT")
+        add_column_if_missing(db, "requests", "dirty_area_photo_count", "INTEGER NOT NULL DEFAULT 0")
 
 
 def add_column_if_missing(db, table: str, column: str, column_type: str) -> None:
@@ -519,6 +520,7 @@ def format_request_notification(
     additional_services=None,
     source: str = "bot",
     synthetic: bool = False,
+    photo_count: int = 0,
 ) -> str:
     """Plain-text message for owners; no parse_mode, so customer text cannot inject markup."""
 
@@ -548,6 +550,7 @@ def format_request_notification(
             f"Контакт: {clip(customer_contact)}",
             *(["Доп. услуги: " + "; ".join(ADDITIONAL_SERVICE_LABELS[k] + " × " + str(v) + " " + ADDITIONAL_SERVICE_UNITS[k] + " = " + format_amount(ADDITIONAL_SERVICE_RATES[k] * v) for k, v in normalize_additional_services(additional_services).items())] if additional_services else []),
             f"Комментарий: {clip(notes, 500)}",
+            *([f"Фото: {photo_count} шт. (оценка вручную)"] if photo_count else []),
         ]
     )
 
