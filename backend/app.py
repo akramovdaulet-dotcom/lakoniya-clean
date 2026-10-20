@@ -14,6 +14,8 @@ from urllib.parse import parse_qsl
 
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
@@ -72,6 +74,11 @@ ALLOWED_STATUSES = {
 }
 
 app = FastAPI(title="Lakoniya Clean API", version="0.2.0")
+
+@app.exception_handler(RequestValidationError)
+async def safe_validation_error_handler(request, exc):
+    errors = [{k: v for k, v in error.items() if k not in {"input", "ctx"}} for error in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": errors})
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(dict.fromkeys(ALLOWED_ORIGINS + SITE_ORIGINS)),
@@ -675,8 +682,8 @@ def pricing():
 
 
 @app.post("/api/public-requests", status_code=201)
-def create_public_request(
-    payload: PublicRequestCreate, request: Request, background_tasks: BackgroundTasks
+async def create_public_request(
+    request: Request, background_tasks: BackgroundTasks
 ):
     """Request from the public website: stored, then sent to the owners' Telegram bot."""
     if not ip_limiter.allow(client_ip(request)) or not global_limiter.allow("all"):
@@ -686,6 +693,18 @@ def create_public_request(
             detail="Too many requests, try again later",
             headers={"Retry-After": "3600"},
         )
+    content_length = request.headers.get("content-length", "")
+    if content_length.isdigit() and int(content_length) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Request body too large")
+    raw_body = await request.body()
+    if len(raw_body) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Request body too large")
+    from pydantic import ValidationError
+    try:
+        payload = PublicRequestCreate.model_validate_json(raw_body)
+    except ValidationError as exc:
+        errors = [{k: v for k, v in error.items() if k not in {"input", "ctx"}} for error in exc.errors()]
+        raise HTTPException(status_code=422, detail=errors) from None
     if payload.website.strip():
         # Honeypot filled: pretend success so the bot learns nothing, store nothing.
         notify_logger.info("Public request ignored: honeypot field filled")
@@ -716,8 +735,8 @@ def create_public_request(
             db,
             """INSERT INTO requests
                (service, address, preferred_time, customer_contact, notes, status,
-                created_at, customer_telegram_id, estimated_amount, source, additional_services_json)
-               VALUES (?, ?, ?, ?, ?, 'Новая', ?, NULL, ?, 'site', ?)""",
+                created_at, customer_telegram_id, estimated_amount, source, additional_services_json, dirty_area_photo_count)
+               VALUES (?, ?, ?, ?, ?, 'Новая', ?, NULL, ?, 'site', ?, ?)""",
             (
                 SERVICE_LABELS[payload.service_code],
                 address,
@@ -727,6 +746,7 @@ def create_public_request(
                 now,
                 amount,
                 extras_json,
+                len(payload.dirty_area_photos),
             ),
             returning_id=True,
         )
@@ -742,8 +762,10 @@ def create_public_request(
             estimated_amount=amount,
             additional_services=payload.additional_services,
             source="site",
+            photo_count=len(payload.dirty_area_photos),
         ),
         payload.dirty_area_photos,
+        request_id,
     )
     return {"id": request_id, "status": "Новая"}
 
