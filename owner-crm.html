@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f5f7fb">
+<title>Лакония Клин — мини-CRM владельца</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--tg-theme-text-color,#172033);background:var(--tg-theme-bg-color,#f5f7fb);--card:var(--tg-theme-secondary-bg-color,#fff);--muted:var(--tg-theme-hint-color,#778197);--accent:var(--tg-theme-button-color,#2878e8)}
+*{box-sizing:border-box}body{margin:0;padding:16px 13px 30px;max-width:760px;margin-inline:auto}h1{font-size:26px;margin:5px 0}h2{font-size:18px;margin:19px 0 9px}.muted,.caption{font-size:12px;color:var(--muted)}p{line-height:1.4;margin:6px 0;color:var(--muted)}.brand{font-size:11px;letter-spacing:.12em;color:var(--accent);font-weight:800}.head{display:flex;justify-content:space-between;align-items:center;gap:12px}.card{background:var(--card);border-radius:16px;padding:14px;margin:9px 0;box-shadow:0 4px 22px #1625440a}.notice{padding:11px 13px;border-radius:12px;font-size:13px;margin:13px 0;background:#e8f4ed;color:#197548}.notice.error{background:#ffe8e8;color:#9f2525}.metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.metric{font-size:24px;font-weight:800;margin-top:5px}.fieldgrid{display:grid;grid-template-columns:1fr 1fr;gap:9px}.field{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted)}input,select,textarea{width:100%;min-width:0;border:1px solid #d9e0eb;border-radius:10px;padding:10px;background:var(--tg-theme-bg-color,#fff);color:var(--tg-theme-text-color,#172033);font:inherit;font-size:14px}textarea{min-height:64px;resize:vertical}.full{grid-column:1/-1}button{border:0;border-radius:10px;padding:11px 13px;font:inherit;font-weight:700;background:var(--accent);color:var(--tg-theme-button-text-color,#fff);cursor:pointer}button:disabled{opacity:.55}.secondary{background:transparent;color:var(--accent);border:1px solid #cddcf7}.bar{display:flex;align-items:center;gap:8px}.bar>*{flex:1}.bar button{flex:0 0 auto}.requesthead{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}.pill{font-size:11px;font-weight:700;background:#e8f4ed;color:#197548;padding:5px 8px;border-radius:99px;white-space:nowrap}.pill.new{background:#fff1cf;color:#815500}.requesttitle{font-weight:800}.actions{display:flex;gap:8px;margin-top:10px}.actions button{flex:1}.empty{text-align:center;padding:22px;color:var(--muted)}.hidden{display:none!important}.divider{height:1px;background:#e5e9f0;margin:12px 0}.footer{text-align:center;font-size:11px;color:var(--muted);margin:18px 0}.sectionhead{display:flex;align-items:center;justify-content:space-between;gap:8px}.sectionhead h2{flex:1}.source{font-size:11px;color:var(--muted);margin-top:3px}@media(min-width:560px){.metrics{grid-template-columns:repeat(4,minmax(0,1fr))}.fieldgrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+</style>
+</head>
+<body>
+<header class="head"><div><div class="brand">ЛАКОНИЯ КЛИН</div><h1>Мини-CRM</h1><p>Заявки, расписание и финансы в одном месте</p></div><div aria-hidden="true" style="font-size:30px">🧽</div></header>
+<div id="notice" class="notice">Проверяем доступ владельца…</div>
+<div class="metrics">
+ <div class="card"><div class="caption">Все заявки</div><div class="metric" id="mTotal">—</div></div>
+ <div class="card"><div class="caption">Новые</div><div class="metric" id="mNew">—</div></div>
+ <div class="card"><div class="caption">В работе</div><div class="metric" id="mActive">—</div></div>
+ <div class="card"><div class="caption">Завершено</div><div class="metric" id="mDone">—</div></div>
+</div>
+<div class="metrics">
+ <div class="card"><div class="caption">Выручка за месяц</div><div class="metric" id="mRevenue">—</div></div>
+ <div class="card"><div class="caption">Расходы за месяц</div><div class="metric" id="mExpenses">—</div></div>
+ <div class="card"><div class="caption">Прибыль за месяц</div><div class="metric" id="mProfit">—</div></div>
+ <div class="card"><div class="caption">Выполнено за месяц</div><div class="metric" id="mMonthDone">—</div></div>
+</div>
+<section class="card">
+ <div class="sectionhead"><h2 style="margin-top:0">＋ Добавить заявку</h2></div>
+ <p class="muted">Для заявок с сайта, звонков, Avito и других источников. Бот никому не пишет автоматически.</p>
+ <form id="newLead">
+  <div class="fieldgrid">
+   <label class="field">Услуга<select name="service" required><option>Поддерживающая уборка</option><option>Генеральная уборка</option><option>Уборка после ремонта</option><option>Мытьё окон</option><option>Другая услуга</option></select></label>
+   <label class="field">Источник<select name="source"><option value="manual">Вручную</option><option value="Телефон">Телефон</option><option value="Avito">Avito</option><option value="Telegram">Telegram</option><option value="VK">ВКонтакте</option><option value="Сайт">Сайт</option><option value="Рекомендация">Рекомендация</option><option value="Другое">Другое</option></select></label>
+   <label class="field full">Адрес / район<input name="address" required maxlength="300" placeholder="Уфа, район или адрес"></label>
+   <label class="field">Контакт клиента<input name="customer_contact" required maxlength="200" placeholder="Телефон, имя или ник"></label>
+   <label class="field">Желаемая дата<input name="preferred_time" placeholder="Например, 25 октября"></label>
+   <label class="field">Предварительная цена, ₽<input name="estimated_amount" type="number" min="0" max="100000000" step="1" placeholder="Необязательно"></label>
+   <label class="field full">Комментарий к заявке<textarea name="notes" maxlength="1000" placeholder="Что нужно убрать, площадь и т. п."></textarea></label>
+  </div>
+  <div class="actions"><button type="submit" id="createButton">Сохранить заявку</button></div>
+ </form>
+</section>
+<section>
+ <div class="sectionhead"><h2>Заявки</h2><button id="refresh" class="secondary" type="button">Обновить</button></div>
+ <div class="bar">
+  <input id="search" type="search" placeholder="Поиск по клиенту, адресу, №">
+  <select id="statusFilter" aria-label="Фильтр по статусу"><option value="">Все статусы</option><option>Новая</option><option>В обработке</option><option>Передана сотруднику</option><option>Подтверждена</option><option>В работе</option><option>Завершена</option><option>Отменена</option></select>
+ </div>
+ <div id="requests"><div class="card empty">Загрузка заявок…</div></div>
+</section>
+<p class="footer">Доступ разрешён только владельцу. Внутренние заметки видны только в панели CRM.</p>
+<script>
+(() => {
+ const API='https://lakoniya-clean.onrender.com';
+ const tg=window.Telegram&&window.Telegram.WebApp;
+ const notice=document.getElementById('notice');
+ const root=document.getElementById('requests');
+ const statuses=['Новая','В обработке','Передана сотруднику','Подтверждена','В работе','Завершена','Отменена'];
+ let allRequests=[];
+ let searchTimer;
+ if(tg){try{tg.ready();tg.expand();}catch(_){}}
+ function el(tag,cls,text){const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=String(text);return n;}
+ function note(message,error=false){notice.textContent=message;notice.className=error?'notice error':'notice';}
+ function money(value){return Number(value||0).toLocaleString('ru-RU')+' ₽';}
+ function dateText(timestamp){if(!timestamp)return 'Дата не указана';const d=new Date(Number(timestamp)*1000);return Number.isNaN(d.getTime())?'Дата не указана':d.toLocaleString('ru-RU');}
+ async function api(path,options={}){
+  const initData=tg&&tg.initData;
+  if(!initData)throw new Error('Откройте панель кнопкой меню бота в Telegram, не обычной ссылкой.');
+  const response=await fetch(API+path,{...options,headers:{'X-Telegram-Init-Data':initData,'Content-Type':'application/json',...(options.headers||{})}});
+  if(response.status===401)throw new Error('Авторизация устарела. Закройте панель и откройте её заново из Telegram.');
+  if(response.status===403)throw new Error('Нет прав владельца. Проверьте OWNER_TELEGRAM_IDS в настройках сервера.');
+  if(response.status===503)throw new Error('Backend не настроен или временно недоступен.');
+  if(!response.ok){let msg='Ошибка сервера ('+response.status+')';try{const d=await response.json();if(d.detail)msg=String(d.detail);}catch(_){}throw new Error(msg);}
+  return response.status===204?null:response.json();
+ }
+ function setMetric(id,value){document.getElementById(id).textContent=value;}
+ async function loadSummary(){
+  const s=await api('/api/crm/summary');
+  setMetric('mTotal',s.total);setMetric('mNew',s.new);setMetric('mActive',s.active);setMetric('mDone',s.completed);
+  setMetric('mRevenue',money(s.month_revenue));setMetric('mExpenses',money(s.month_expenses));setMetric('mProfit',money(s.month_profit));setMetric('mMonthDone',s.month_completed);
+ }
+ function field(card,label,value){const p=el('p');p.append(el('b','',label+': '),document.createTextNode(value===null||value===undefined||value===''?'Не указано':String(value)));card.append(p);}
+ function makeInput(label,value,attrs={}){
+  const wrap=el('label','field');wrap.append(el('span','',label));
+  const input=el(attrs.multiline?'textarea':'input');
+  if(attrs.multiline){input.maxLength=2000;input.value=value||'';}else{input.value=value??'';if(attrs.type)input.type=attrs.type;if(attrs.step)input.step=attrs.step;if(attrs.min!==undefined)input.min=attrs.min;if(attrs.max!==undefined)input.max=attrs.max;}
+  wrap.append(input);return {wrap,input};
+ }
+ async function saveCrm(id,values,button){
+  button.disabled=true;
+  try{await api('/api/requests/'+id+'/crm',{method:'PATCH',body:JSON.stringify(values)});note('CRM по заявке №'+id+' сохранена.');await refreshAll(false);}
+  catch(e){note(e.message||'Не удалось сохранить CRM.',true);}
+  finally{button.disabled=false;}
+ }
+ async function changeStatus(id,status,button){
+  button.disabled=true;
+  try{await api('/api/requests/'+id+'/status',{method:'PATCH',body:JSON.stringify({status})});note('Статус заявки №'+id+' обновлён.');await refreshAll(false);}
+  catch(e){note(e.message||'Не удалось изменить статус.',true);}
+  finally{button.disabled=false;}
+ }
+ function render(items){
+  root.replaceChildren();
+  if(!items.length){root.append(el('div','card empty','Заявок по этим фильтрам нет.'));return;}
+  for(const r of items){
+   const card=el('article','card');
+   const top=el('div','requesthead');
+   const heading=el('div');heading.append(el('div','requesttitle','Заявка №'+r.id),el('div','source',dateText(r.created_at)));
+   top.append(heading,el('span','pill'+(r.status==='Новая'?' new':''),r.status));card.append(top);
+   field(card,'Источник',r.source==='site'?'Сайт':(r.source==='bot'?'Telegram-бот':(r.source||'Telegram-бот')));
+   field(card,'Услуга',r.service);field(card,'Адрес / район',r.address);field(card,'Желаемая дата',r.preferred_time);
+   field(card,'Контакт',r.customer_contact);field(card,'Предварительная цена',r.estimated_amount===null?'Не рассчитана':money(r.estimated_amount));
+   if(r.notes)field(card,'Комментарий клиента',r.notes);
+   const divider=el('div','divider');card.append(divider);
+   const grid=el('div','fieldgrid');
+   const schedule=makeInput('Запланировано на',r.scheduled_at||'');schedule.input.type='datetime-local';
+   const actual=makeInput('Фактическая выручка, ₽',r.actual_amount,{type:'number',min:0,step:1});
+   const expenses=makeInput('Расходы, ₽',r.expenses_amount,{type:'number',min:0,step:1});
+   const ownerNotes=makeInput('Внутренняя заметка владельца',r.owner_notes,{multiline:true});ownerNotes.wrap.classList.add('full');
+   grid.append(schedule.wrap,actual.wrap,expenses.wrap,ownerNotes.wrap);card.append(grid);
+   const actions=el('div','actions');
+   const save=el('button','','Сохранить данные');save.type='button';
+   save.addEventListener('click',()=>saveCrm(r.id,{
+    scheduled_at:schedule.input.value||null,
+    actual_amount:actual.input.value===''?null:Number(actual.input.value),
+    expenses_amount:expenses.input.value===''?null:Number(expenses.input.value),
+    owner_notes:ownerNotes.input.value
+   },save));
+   const status=el('select');status.setAttribute('aria-label','Статус заявки');
+   for(const value of statuses){const o=el('option','',value);o.value=value;o.selected=value===r.status;status.append(o);}
+   const update=el('button','secondary','Статус');update.type='button';update.addEventListener('click',()=>changeStatus(r.id,status.value,update));
+   actions.append(save,update);card.append(status,actions);root.append(card);
+  }
+ }
+ async function loadRequests(){
+  const params=new URLSearchParams();const q=document.getElementById('search').value.trim();const status=document.getElementById('statusFilter').value;
+  if(q)params.set('q',q);if(status)params.set('status',status);
+  const data=await api('/api/requests'+(params.size?'?'+params.toString():''));
+  allRequests=Array.isArray(data.requests)?data.requests:[];
+  render(allRequests);
+ }
+ async function refreshAll(showMessage=true){
+  const button=document.getElementById('refresh');button.disabled=true;
+  try{await Promise.all([loadSummary(),loadRequests()]);if(showMessage)note('Подключено. Данные загружены из базы.');}
+  catch(e){if(showMessage)note(e.message||'Не удалось загрузить данные.',true);if(!allRequests.length)root.replaceChildren(el('div','card empty',e.message||'Ошибка загрузки'));}
+  finally{button.disabled=false;}
+ }
+ document.getElementById('newLead').addEventListener('submit',async event=>{
+  event.preventDefault();const form=event.currentTarget;const button=document.getElementById('createButton');button.disabled=true;
+  const data=new FormData(form);const payload={
+   service:data.get('service'),address:data.get('address'),customer_contact:data.get('customer_contact'),
+   preferred_time:data.get('preferred_time')||'Не согласовано',notes:data.get('notes')||'',
+   source:data.get('source')||'manual',
+   estimated_amount:data.get('estimated_amount')===''?null:Number(data.get('estimated_amount'))
+  };
+  try{const result=await api('/api/requests/manual',{method:'POST',body:JSON.stringify(payload)});form.reset();note('Заявка №'+result.id+' добавлена. Клиенту ничего не отправляли.');await refreshAll(false);}
+  catch(e){note(e.message||'Не удалось добавить заявку.',true);}
+  finally{button.disabled=false;}
+ });
+ document.getElementById('refresh').addEventListener('click',()=>refreshAll(true));
+ document.getElementById('statusFilter').addEventListener('change',()=>refreshAll(false));
+ document.getElementById('search').addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>refreshAll(false),250);});
+ refreshAll(true);
+})();
+</script>
+</body>
+</html>
