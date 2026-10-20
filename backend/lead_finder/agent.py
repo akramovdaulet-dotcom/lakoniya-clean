@@ -334,11 +334,24 @@ def run_search(searcher: Any, queries: tuple[tuple[str, str], ...] = SEARCH_QUER
     review = [r for r in all_records if r["status"] == "Требует проверки"]
     rejected = [r for r in all_records if r["status"] == "Отклонён"]
     duplicate_count = max(0, raw_count - len(records))
+    sources_with_results = sorted(
+        name for name, stats in source_stats.items() if stats["results"] > 0
+    )
+    sources_with_no_results = sorted(
+        name for name, stats in source_stats.items()
+        if stats["queries_succeeded"] > 0 and stats["results"] == 0
+    )
     summary = {
         "sources_attempted": len(attempted_sources),
+        # This is search-provider/API success, NOT proof that the source website
+        # itself was opened or verified directly.
         "sources_with_successful_queries": sum(
             1 for s in source_stats.values() if s["queries_succeeded"] > 0
         ),
+        "sources_with_results": sources_with_results,
+        "sources_with_no_results": sources_with_no_results,
+        "sources_directly_verified": 0,
+        "direct_page_fetch_performed": False,
         "sources_unavailable_or_failed": [
             name for name in sorted(attempted_sources)
             if source_stats[name]["queries_succeeded"] == 0
@@ -385,7 +398,9 @@ def render_digest(report: dict[str, Any]) -> str:
     confirmed = report["confirmed_candidates"]
     lines = [
         "Лакония Клин · поиск публичных заявок в Уфе",
-        f"Проверок источников: {summary['sources_attempted']}; с успешными запросами: {summary['sources_with_successful_queries']}",
+        f"Источников в поиске: {summary['sources_attempted']}; запросы API успешны: {summary['sources_with_successful_queries']}",
+        f"Источники с результатами: {len(summary['sources_with_results'])}; без результатов: {', '.join(summary['sources_with_no_results']) or 'нет'}",
+        "Прямое открытие страниц-источников: не выполнялось",
         f"Получено результатов: {summary['candidate_results_received']}; уникальных кандидатов: {summary['unique_candidates']}",
         f"Подтверждено: {summary['confirmed_candidates']}; требуют проверки: {summary['needs_review']}; отклонено: {summary['rejected']}",
         f"Удалено дублей: {summary['duplicates_removed']}",
