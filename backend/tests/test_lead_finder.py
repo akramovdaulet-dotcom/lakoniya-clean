@@ -83,3 +83,13 @@ def test_seen_state_json_is_valid(tmp_path: Path):
     path = tmp_path / "seen.json"
     save_seen(path, {"https://example.org/a"})
     assert json.loads(path.read_text(encoding="utf-8")) == ["https://example.org/a"]
+
+
+def test_search_query_alone_does_not_make_competitor_page_a_lead():
+    result = SearchResult(
+        title="Клининг в Уфе: услуги и цены",
+        url="https://example.org/services",
+        description="Профессиональная уборка квартир и офисов.",
+        query='"ищу уборку" Уфа',
+    )
+    assert score_result(result) is None
