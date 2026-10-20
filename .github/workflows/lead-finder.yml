@@ -1,0 +1,43 @@
+name: Find Ufa cleaning leads
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Результатов на один поисковый запрос"
+        required: true
+        type: choice
+        default: "5"
+        options:
+          - "3"
+          - "5"
+          - "8"
+
+permissions:
+  contents: read
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Search public web results
+        working-directory: backend
+        env:
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+        run: |
+          python -m lead_finder.agent --limit "${{ inputs.limit }}" --include-seen --output lead-finder-results.json --state .lead-finder-seen.json
+      - name: Upload lead report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ufa-lead-finder-${{ github.run_id }}
+          path: backend/lead-finder-results.json
+          if-no-files-found: warn
+          retention-days: 7
