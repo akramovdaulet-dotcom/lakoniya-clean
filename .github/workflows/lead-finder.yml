@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "backend/lead_finder/**"
+      - "backend/tests/**"
       - ".github/workflows/lead-finder.yml"
   workflow_dispatch:
     inputs:
@@ -24,7 +25,7 @@ permissions:
 jobs:
   search:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -32,12 +33,17 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install test runner
+        run: python -m pip install pytest
+      - name: Run lead-finder regression tests
+        working-directory: backend
+        run: python -m pytest -q tests/test_lead_finder.py
       - name: Search public web results
         working-directory: backend
         env:
           FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
         run: |
-          python -m lead_finder.agent --limit "${{ inputs.limit || '5' }}" --include-seen --output lead-finder-results.json --state .lead-finder-seen.json
+          python -m lead_finder.agent --limit "${{ inputs.limit || '5' }}" --output lead-finder-results.json --state .lead-finder-seen.json
       - name: Upload lead report
         if: always()
         uses: actions/upload-artifact@v4
