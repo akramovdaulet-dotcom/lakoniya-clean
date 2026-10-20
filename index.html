@@ -41,6 +41,7 @@ h1{font-size:clamp(40px,7vw,68px);line-height:1.02;letter-spacing:-2px;margin:22
 .notice{background:#fff8eb;border:1px solid #f1dfc2;padding:13px;border-radius:12px;font-size:13px}
 .consent{display:flex;gap:10px;align-items:flex-start;margin:18px 0;font-size:14px}
 .consent input{width:20px;height:20px;margin-top:2px;flex:none}
+.photo-previews{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;max-width:100%}.photo-preview{position:relative;width:88px;max-width:calc(33.333% - 6px)}.photo-preview img{display:block;width:100%;height:76px;object-fit:cover;border-radius:8px}.photo-preview button{width:100%;margin-top:4px;padding:5px;border:1px solid #cbd5cf;border-radius:6px;background:#fff;color:#24352b;font-size:12px}
 .msg{margin:14px 0;padding:12px 14px;border-radius:12px;font-size:14px}
 .msg.info{background:#fff8eb;border:1px solid #f1dfc2}
 .msg.err{background:#fdecea;border:1px solid #f3c3bd;color:#7a1f14}
@@ -88,9 +89,11 @@ footer{border-top:1px solid var(--line);padding:25px 0;color:var(--muted);font-s
 </div>
 <div class="field"><label for="address">Адрес уборки *</label><input id="address" name="address" autocomplete="street-address" maxlength="300" placeholder="Улица, дом, квартира"></div>
 <div class="field"><label for="date">Желаемая дата *</label><input id="date" name="preferred_date" type="date"></div>
+<div class="field"><label for="dirtyPhotos">Фото загрязнённых участков (необязательно, до 5 фото)</label><input id="dirtyPhotos" type="file" accept="image/jpeg,image/png,image/webp" multiple><p class="muted">Фото сожмутся перед отправкой; стоимость этих участков оценит менеджер вручную. Не снимайте людей и документы.</p><div id="photoPreviews" class="photo-previews" aria-live="polite"></div><p class="msg err hidden" id="photoError" role="alert"></p></div>
 <div class="field"><label for="details">Комментарий</label><textarea id="details" name="notes" rows="3" maxlength="1000" placeholder="Например: есть питомцы, нужно мытьё окон"></textarea></div>
+
 <div class="hp" aria-hidden="true"><label>Не заполняйте это поле <input id="website" name="website" tabindex="-1" autocomplete="off"></label></div>
-<label class="consent"><input id="consent" name="consent" type="checkbox"><span>Согласен(на) на обработку персональных данных (имя, телефон, адрес) для связи по заявке. *</span></label>
+<label class="consent"><input id="consent" name="consent" type="checkbox"><span>Согласен(на) на обработку персональных данных (имя, телефон, адрес и приложенные фото загрязнений) для связи по заявке. Фото не должны содержать людей и документы. *</span></label>
 <p class="msg info hidden" id="status" role="status"></p>
 <p class="msg err hidden" id="error" role="alert"></p>
 <button class="btn" id="submit" type="submit">Отправить заявку</button>
@@ -187,6 +190,7 @@ function validate() {
     district: $('#district').value,
     preferred_date: $('#date').value,
     notes: $('#details').value.trim(),
+    dirty_area_photos: window.dirtyAreaPhotoData || [],
     consent: true,
     website: $('#website').value
   };
@@ -202,10 +206,75 @@ function messageFor(error) {
   return 'Не удалось связаться с сервером. Введённые данные сохранены в форме — попробуйте отправить ещё раз через минуту.';
 }
 
+let selectedDirtyPhotos = [];
+const photoInput = $('#dirtyPhotos');
+function renderPhotoPreviews() {
+  const container = $('#photoPreviews');
+  container.replaceChildren();
+  selectedDirtyPhotos.forEach((file, index) => {
+    const card = document.createElement('div'); card.className = 'photo-preview';
+    const image = document.createElement('img'); image.alt = 'Фото загрязнения ' + (index + 1);
+    image.src = URL.createObjectURL(file);
+    image.onload = () => URL.revokeObjectURL(image.src);
+    const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Убрать';
+    remove.addEventListener('click', () => {
+      selectedDirtyPhotos.splice(index, 1);
+      const transfer = new DataTransfer();
+      selectedDirtyPhotos.forEach(item => transfer.items.add(item));
+      photoInput.files = transfer.files;
+      renderPhotoPreviews();
+    });
+    card.append(image, remove); container.append(card);
+  });
+}
+photoInput.addEventListener('change', () => {
+  hide($('#photoError'));
+  const chosen = Array.from(photoInput.files || []);
+  if (chosen.length > 5) { show($('#photoError'), 'Можно прикрепить не больше 5 фотографий.'); photoInput.value = ''; selectedDirtyPhotos = []; renderPhotoPreviews(); return; }
+  if (chosen.some(file => !['image/jpeg','image/png','image/webp'].includes(file.type) || !file.size)) {
+    show($('#photoError'), 'Допустимы только JPEG, PNG или WebP.'); photoInput.value = ''; selectedDirtyPhotos = []; renderPhotoPreviews(); return;
+  }
+  selectedDirtyPhotos = chosen; renderPhotoPreviews();
+});
+function compressPhoto(file) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    const url = URL.createObjectURL(file);
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      const scale = Math.min(1, 1600 / Math.max(image.naturalWidth, image.naturalHeight));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+      const context = canvas.getContext('2d');
+      if (!context) { reject(new Error('canvas unavailable')); return; }
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob(blob => {
+        if (!blob) { reject(new Error('compression failed')); return; }
+        if (blob.size > 3 * 1024 * 1024) { reject(new Error('photo too large after compression')); return; }
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error('photo read failed'));
+        reader.readAsDataURL(blob);
+      }, 'image/jpeg', 0.8);
+    };
+    image.onerror = () => { URL.revokeObjectURL(url); reject(new Error('invalid image')); };
+    image.src = url;
+  });
+}
 $('#requestForm').addEventListener('submit', async event => {
   event.preventDefault();
+  hide($('#photoError'));
   const payload = validate();
   if (!payload) return;
+  try {
+    payload.dirty_area_photos = await Promise.all(selectedDirtyPhotos.map(compressPhoto));
+    const totalPhotoBytes = payload.dirty_area_photos.reduce((sum, data) => sum + Math.ceil((data.split(',')[1] || '').length * 3 / 4), 0);
+    if (totalPhotoBytes > 10 * 1024 * 1024) throw new Error('Общий размер фото после сжатия должен быть не больше 10 МБ.');
+  } catch (error) {
+    show($('#photoError'), error.message && error.message.startsWith('Общий') ? error.message : 'Не удалось сжать фото до допустимого размера. Уберите фото или выберите другие.');
+    return;
+  }
   const button = $('#submit');
   button.disabled = true; button.textContent = 'Отправляем…';
   const slow = setTimeout(() => show($('#status'), 'Сервер просыпается, это может занять до минуты. Не закрывайте страницу…'), 6000);
@@ -225,7 +294,7 @@ $('#requestForm').addEventListener('submit', async event => {
     $('#formBox').classList.add('hidden');
     $('#successBox').classList.remove('hidden');
     $('#successBox').focus();
-    $('#requestForm').reset(); calc();
+    $('#requestForm').reset(); selectedDirtyPhotos = []; photoInput.value = ''; renderPhotoPreviews(); calc();
   } catch (error) {
     show($('#error'), messageFor(error));
   } finally {

@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import hmac
 import json
@@ -13,6 +14,8 @@ from urllib.parse import parse_qsl
 
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
@@ -71,6 +74,11 @@ ALLOWED_STATUSES = {
 }
 
 app = FastAPI(title="Lakoniya Clean API", version="0.2.0")
+
+@app.exception_handler(RequestValidationError)
+async def safe_validation_error_handler(request, exc):
+    errors = [{k: v for k, v in error.items() if k not in {"input", "ctx"}} for error in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": errors})
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(dict.fromkeys(ALLOWED_ORIGINS + SITE_ORIGINS)),
@@ -136,6 +144,7 @@ def initialize_db():
         add_column_if_missing(db, "requests", "source", "TEXT")
         # JSON snapshot of selected extra services and quantities.
         add_column_if_missing(db, "requests", "additional_services_json", "TEXT")
+        add_column_if_missing(db, "requests", "dirty_area_photo_count", "INTEGER NOT NULL DEFAULT 0")
 
 
 def add_column_if_missing(db, table: str, column: str, column_type: str) -> None:
@@ -308,6 +317,38 @@ CONTACT_CHANNELS = {"Telegram", "MAX", "Телефон", "Электронная
 PHONE_ALLOWED = re.compile(r"\+?[0-9 ()\-]+")
 
 
+MAX_PHOTO_BYTES = 3 * 1024 * 1024
+MAX_PHOTOS_TOTAL_BYTES = 10 * 1024 * 1024
+PHOTO_SIGNATURES = {
+    "image/jpeg": lambda data: data.startswith(bytes.fromhex("FFD8FF")),
+    "image/png": lambda data: data.startswith(bytes.fromhex("89504E470D0A1A0A")),
+    "image/webp": lambda data: len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP",
+}
+
+def validate_dirty_area_photos(value):
+    if len(value) > 5:
+        raise ValueError("no more than 5 photos are allowed")
+    total_bytes = 0
+    for photo in value:
+        if not isinstance(photo, str) or "," not in photo:
+            raise ValueError("photos must be base64 data URLs")
+        header, encoded = photo.split(",", 1)
+        mime = header.removeprefix("data:").removesuffix(";base64")
+        if mime not in PHOTO_SIGNATURES or not header.endswith(";base64"):
+            raise ValueError("photos must be JPEG, PNG or WebP")
+        try:
+            decoded = base64.b64decode(encoded, validate=True)
+        except (ValueError, base64.binascii.Error):
+            raise ValueError("invalid photo encoding") from None
+        if not decoded or len(decoded) > MAX_PHOTO_BYTES:
+            raise ValueError("each photo must be no larger than 3 MB")
+        if not PHOTO_SIGNATURES[mime](decoded):
+            raise ValueError("photo contents do not match the declared image type")
+        total_bytes += len(decoded)
+    if total_bytes > MAX_PHOTOS_TOTAL_BYTES:
+        raise ValueError("photos total must be no larger than 10 MB")
+    return value
+
 class RequestCreate(BaseModel):
     service: str = Field(min_length=1, max_length=100)
     address: str = Field(min_length=1, max_length=300)
@@ -319,6 +360,12 @@ class RequestCreate(BaseModel):
     service_code: str | None = Field(default=None, max_length=20)
     area: int | None = Field(default=None, ge=MIN_AREA, le=MAX_AREA)
     additional_services: dict[str, int] = Field(default_factory=dict)
+    dirty_area_photos: list[str] = Field(default_factory=list, max_length=5)
+
+    @field_validator("dirty_area_photos")
+    @classmethod
+    def validate_dirty_area_photos_field(cls, value):
+        return validate_dirty_area_photos(value)
 
     @field_validator("additional_services")
     @classmethod
@@ -346,6 +393,12 @@ class PublicRequestCreate(BaseModel):
     consent: bool  # required: a missing value is rejected too
     website: str = Field(default="", max_length=200)  # honeypot: real visitors never fill it
     additional_services: dict[str, int] = Field(default_factory=dict)
+    dirty_area_photos: list[str] = Field(default_factory=list, max_length=5)
+
+    @field_validator("dirty_area_photos")
+    @classmethod
+    def validate_dirty_area_photos_field(cls, value):
+        return validate_dirty_area_photos(value)
 
     @field_validator("additional_services")
     @classmethod
@@ -474,6 +527,7 @@ def format_request_notification(
     additional_services=None,
     source: str = "bot",
     synthetic: bool = False,
+    photo_count: int = 0,
 ) -> str:
     """Plain-text message for owners; no parse_mode, so customer text cannot inject markup."""
 
@@ -503,38 +557,55 @@ def format_request_notification(
             f"Контакт: {clip(customer_contact)}",
             *(["Доп. услуги: " + "; ".join(ADDITIONAL_SERVICE_LABELS[k] + " × " + str(v) + " " + ADDITIONAL_SERVICE_UNITS[k] + " = " + format_amount(ADDITIONAL_SERVICE_RATES[k] * v) for k, v in normalize_additional_services(additional_services).items())] if additional_services else []),
             f"Комментарий: {clip(notes, 500)}",
+            *([f"Фото: {photo_count} шт. (оценка вручную)"] if photo_count else []),
         ]
     )
 
 
-def notify_owners(text: str) -> None:
-    """Send `text` to every owner through the owner bot.
-
-    Runs after the response is sent. Failures are logged without the bot token
-    or any customer data and never affect the stored request.
-    """
+def notify_owners(text: str, photos: list[str] | None = None, request_id: int | None = None) -> None:
+    """Send owner notification and photos; logs never include tokens or file contents."""
     if not NOTIFY_OWNERS:
         return
     if not OWNER_BOT_TOKEN or not OWNER_IDS:
         notify_logger.warning("Owner notification skipped: owner bot or owner ids not configured")
         return
-    url = f"{TELEGRAM_API_URL}/bot{OWNER_BOT_TOKEN}/sendMessage"
+    photos = photos or []
     for chat_id in sorted(OWNER_IDS):
         try:
-            response = httpx.post(
-                url,
-                json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
-                timeout=10,
-            )
-        except httpx.HTTPError as exc:
-            # Log only the exception class: httpx messages can include the request URL (token).
-            notify_logger.warning("Owner notification failed: %s", type(exc).__name__)
-            continue
-        if response.status_code != 200:
-            # 403 usually means the owner has not pressed Start in the owner bot yet.
-            notify_logger.warning(
-                "Owner notification rejected: owner_id=%d status=%d", chat_id, response.status_code
-            )
+            response = httpx.post(f"{TELEGRAM_API_URL}/bot{OWNER_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True}, timeout=10)
+            if response.status_code != 200:
+                notify_logger.warning("Owner notification rejected: owner_id=%d status=%d", chat_id, response.status_code)
+                continue
+            if not photos:
+                continue
+            media, files = [], {}
+            for index, photo in enumerate(photos, start=1):
+                header, encoded = photo.split(",", 1)
+                mime = header[5:].split(";", 1)[0]
+                raw = base64.b64decode(encoded, validate=True)
+                filename = f"dirty-area-{index}.jpg"
+                media.append({"type": "photo", "media": f"attach://{filename}", "caption": f"Заявка №{request_id} · фото {index}/{len(photos)}"})
+                files[filename] = (filename, raw, mime)
+            if len(media) == 1:
+                filename = next(iter(files))
+                photo_response = httpx.post(f"{TELEGRAM_API_URL}/bot{OWNER_BOT_TOKEN}/sendPhoto",
+                    data={"chat_id": chat_id, "caption": f"Заявка №{request_id} · фото 1/1"},
+                    files={"photo": files[filename]}, timeout=25)
+            else:
+                photo_response = httpx.post(f"{TELEGRAM_API_URL}/bot{OWNER_BOT_TOKEN}/sendMediaGroup",
+                    data={"chat_id": chat_id, "media": json.dumps(media, ensure_ascii=False)}, files=files, timeout=30)
+            if photo_response.status_code != 200:
+                notify_logger.warning("Owner photos rejected: request_id=%s status=%d", request_id, photo_response.status_code)
+                httpx.post(f"{TELEGRAM_API_URL}/bot{OWNER_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": chat_id, "text": f"Фото к заявке №{request_id} не удалось доставить, свяжитесь с клиентом"}, timeout=10)
+        except (httpx.HTTPError, ValueError, base64.binascii.Error) as exc:
+            notify_logger.warning("Owner photo delivery failed: request_id=%s reason=%s", request_id, type(exc).__name__)
+            try:
+                httpx.post(f"{TELEGRAM_API_URL}/bot{OWNER_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": chat_id, "text": f"Фото к заявке №{request_id} не удалось доставить, свяжитесь с клиентом"}, timeout=10)
+            except httpx.HTTPError:
+                pass
 
 
 NOTIFY_CUSTOMERS = os.environ.get("NOTIFY_CUSTOMERS", "true").strip().lower() != "false"
@@ -611,8 +682,8 @@ def pricing():
 
 
 @app.post("/api/public-requests", status_code=201)
-def create_public_request(
-    payload: PublicRequestCreate, request: Request, background_tasks: BackgroundTasks
+async def create_public_request(
+    request: Request, background_tasks: BackgroundTasks
 ):
     """Request from the public website: stored, then sent to the owners' Telegram bot."""
     if not ip_limiter.allow(client_ip(request)) or not global_limiter.allow("all"):
@@ -622,6 +693,18 @@ def create_public_request(
             detail="Too many requests, try again later",
             headers={"Retry-After": "3600"},
         )
+    content_length = request.headers.get("content-length", "")
+    if content_length.isdigit() and int(content_length) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Request body too large")
+    raw_body = await request.body()
+    if len(raw_body) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Request body too large")
+    from pydantic import ValidationError
+    try:
+        payload = PublicRequestCreate.model_validate_json(raw_body)
+    except ValidationError as exc:
+        errors = [{k: v for k, v in error.items() if k not in {"input", "ctx"}} for error in exc.errors()]
+        raise HTTPException(status_code=422, detail=errors) from None
     if payload.website.strip():
         # Honeypot filled: pretend success so the bot learns nothing, store nothing.
         notify_logger.info("Public request ignored: honeypot field filled")
@@ -652,8 +735,8 @@ def create_public_request(
             db,
             """INSERT INTO requests
                (service, address, preferred_time, customer_contact, notes, status,
-                created_at, customer_telegram_id, estimated_amount, source, additional_services_json)
-               VALUES (?, ?, ?, ?, ?, 'Новая', ?, NULL, ?, 'site', ?)""",
+                created_at, customer_telegram_id, estimated_amount, source, additional_services_json, dirty_area_photo_count)
+               VALUES (?, ?, ?, ?, ?, 'Новая', ?, NULL, ?, 'site', ?, ?)""",
             (
                 SERVICE_LABELS[payload.service_code],
                 address,
@@ -663,6 +746,7 @@ def create_public_request(
                 now,
                 amount,
                 extras_json,
+                len(payload.dirty_area_photos),
             ),
             returning_id=True,
         )
@@ -678,7 +762,10 @@ def create_public_request(
             estimated_amount=amount,
             additional_services=payload.additional_services,
             source="site",
+            photo_count=len(payload.dirty_area_photos),
         ),
+        payload.dirty_area_photos,
+        request_id,
     )
     return {"id": request_id, "status": "Новая"}
 

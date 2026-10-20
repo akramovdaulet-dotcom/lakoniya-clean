@@ -11,23 +11,15 @@ os.environ.setdefault("ALLOWED_ORIGINS", "https://lakoniya-miniapp-test.pages.de
 os.environ.setdefault("NOTIFY_OWNERS", "false")
 os.environ.setdefault("NOTIFY_CUSTOMERS", "false")
 
-try:
-    # The backend workflow runs pytest with backend/ as its working directory.
-    from app import (
-        ADDITIONAL_SERVICE_RATES,
-        estimate_amount,
-        format_request_notification,
-        normalize_additional_services,
-    )
-except ModuleNotFoundError:
-    # Also support running the suite from the repository root.
-    from backend.app import (
-        ADDITIONAL_SERVICE_RATES,
-        estimate_amount,
-        format_request_notification,
-        normalize_additional_services,
-    )
-
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from app import (
+    ADDITIONAL_SERVICE_RATES,
+    estimate_amount,
+    format_request_notification,
+    normalize_additional_services,
+)
 
 def test_additional_service_rates_are_configured():
     assert ADDITIONAL_SERVICE_RATES == {"windows": 400, "ironing": 500, "dishes": 500}
