@@ -59,7 +59,10 @@ NEGATIVE_TERMS = (
     "спиливание веток", "отзывы", "отзыв о клининге", "рейтинг клинингов",
     "топ клинингов", "лучшие клининговые компании", "каталог клинингов",
     "прайс-лист", "прайс лист", "наши услуги", "закажите у нас",
-    "мы предлагаем уборку", "предлагаем услуги уборки",
+    "мы предлагаем уборку", "предлагаем услуги уборки", "закажите уборку",
+    "выполним уборку", "бесплатный выезд", "работаем с юридическими",
+    "вы можете заказать уборку через сайт", "стоимость от", "клинеров со",
+    "уборщиков,", "компания в уфе", "профессиональная уборка в уфе",
 )
 TRACKING_KEYS = {"fbclid", "gclid", "yclid", "ref", "source", "utm_source", "utm_medium", "utm_campaign"}
 
@@ -130,6 +133,33 @@ def service_type(text: str) -> str:
     return "Другое / не уточнено"
 
 
+def is_listing_or_provider_page(url: str, text: str) -> str | None:
+    """Reject provider/service listings masquerading as customer requests."""
+    parts = urlsplit(url)
+    host = parts.netloc.lower().removeprefix("www.")
+    path = parts.path.lower()
+    if "avito.ru" in host and "/predlozheniya_uslug/" in path:
+        return "Страница предложения услуги Avito, а не клиентская заявка"
+    if "uslugi.yandex.ru" in host and "/category" in path:
+        return "Категория/каталог исполнителей Яндекс Услуг, а не отдельная заявка"
+    if "profi.ru" in host and "/geo-" in path and not any(
+        marker in path for marker in ("/order", "/request", "/zakaz", "/task")
+    ):
+        return "Каталог исполнителей Profi.ru, а не отдельная заявка"
+    if host in {"vk.com", "m.vk.com"} and not re.search(r"/wall-?\\d+_\\d+", path):
+        return "Профиль или страница сообщества ВКонтакте, а не отдельная публикация"
+    if host in {"t.me", "telegram.me"} and not re.search(r"/[^/]+/\\d+$", path):
+        return "Страница канала/группы Telegram, а не отдельный пост"
+    provider_phrases = (
+        "наши услуги", "предлагаем услуги", "закажите уборку", "выполним уборку",
+        "бесплатный выезд", "стоимость от", "работаем с юридическими",
+        "закажите у нас", "профессиональная уборка в уфе",
+    )
+    if any(phrase in text for phrase in provider_phrases):
+        return "Похоже на коммерческое предложение исполнителя, а не запрос клиента"
+    return None
+
+
 def classify_result(result: SearchResult, today: date | None = None) -> dict[str, Any]:
     """Return a full candidate record, including rejected candidates for auditability."""
     today = today or datetime.now(timezone.utc).date()
@@ -162,6 +192,9 @@ def classify_result(result: SearchResult, today: date | None = None) -> dict[str
 
     if not result.url or url == "Не указано" or urlsplit(url).scheme not in {"http", "https"}:
         return reject("Нет корректной ссылки на первоисточник")
+    page_rejection = is_listing_or_provider_page(url, text)
+    if page_rejection:
+        return reject(page_rejection)
     if any(term in text for term in NEGATIVE_TERMS):
         return reject("Похоже на отзыв, рекламу, каталог, информационную страницу или вакансию")
     if not any(term in text for term in SERVICE_TERMS):
