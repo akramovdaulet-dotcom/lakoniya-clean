@@ -6,7 +6,6 @@ and optionally sends a digest to the owner's Telegram chat. It never contacts le
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
 import re
@@ -40,8 +39,8 @@ BUYING_INTENT_TERMS = (
     "ищу убор", "ищем убор", "нужна убор", "нужен клининг",
     "нужна уборщиц", "нужен уборщик", "заказать убор", "заказать клининг",
     "требуется уборка", "ищу клинингов", "нужна клинингов",
-    "кто убер", "посоветуйте убор", "посоветуйте клининг",
-    "после ремонта", "сколько стоит убор",
+    "кто убер", "кто может убраться", "посоветуйте убор", "посоветуйте клининг",
+    "заказ на убор", "заказ на клининг", "сколько стоит убор",
 )
 NEGATIVE_TERMS = (
     "вакансия", "вакансии", "ищем сотрудник", "требуется сотрудник",
@@ -80,7 +79,9 @@ def normalize_url(url: str) -> str:
 
 
 def score_result(result: SearchResult) -> Lead | None:
-    text = f"{result.title} {result.description} {result.query}".lower()
+    # Score only content from the result, never the search query itself. Otherwise
+    # a query such as "ищу уборку Уфа" would make every result look like a lead.
+    text = f"{result.title} {result.description}".lower()
     if not result.url.startswith(("http://", "https://")):
         return None
     if any(term in text for term in NEGATIVE_TERMS):
@@ -159,7 +160,7 @@ def find_leads(searcher: Any, queries: tuple[str, ...] = SEARCH_QUERIES,
             current = by_url.get(lead.url)
             if current is None or lead.score > current.score:
                 by_url[lead.url] = lead
-        time.sleep(0.05)  # be polite to the provider and avoid bursty calls
+        time.sleep(0.05)
     return sorted(by_url.values(), key=lambda lead: (-lead.score, lead.title.lower()))
 
 
