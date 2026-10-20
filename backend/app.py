@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import sqlite3
 import time
 from collections import deque
@@ -13,7 +14,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl
 
 import httpx
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -146,6 +147,8 @@ def initialize_db():
         # JSON snapshot of selected extra services and quantities.
         add_column_if_missing(db, "requests", "additional_services_json", "TEXT")
         add_column_if_missing(db, "requests", "dirty_area_photo_count", "INTEGER NOT NULL DEFAULT 0")
+        # Secret of the customer's status link (site requests only; the customer has no Telegram chat).
+        add_column_if_missing(db, "requests", "status_token", "TEXT")
 
 
 def add_column_if_missing(db, table: str, column: str, column_type: str) -> None:
@@ -492,6 +495,18 @@ def _env_int(name: str, default: int) -> int:
 # Per visitor and overall caps for the public form (requests per hour).
 ip_limiter = SlidingWindowLimiter(_env_int("PUBLIC_RATE_LIMIT_PER_HOUR", 5), 3600)
 global_limiter = SlidingWindowLimiter(_env_int("PUBLIC_RATE_LIMIT_GLOBAL_PER_HOUR", 60), 3600)
+# Status page polling and token guessing are limited per visitor.
+status_limiter = SlidingWindowLimiter(_env_int("PUBLIC_STATUS_LIMIT_PER_HOUR", 120), 3600)
+
+PUBLIC_STATUS_TEXT = {
+    "Новая": "Заявка принята. Мы скоро свяжемся с вами.",
+    "В обработке": "Заявка в обработке.",
+    "Передана сотруднику": "Заявка передана сотруднику, он свяжется с вами.",
+    "Подтверждена": "Заявка подтверждена. Ждём вас в назначенное время.",
+    "В работе": "Уборка выполняется.",
+    "Завершена": "Заявка выполнена. Спасибо!",
+    "Отменена": "Заявка отменена.",
+}
 
 
 def client_ip(request) -> str:
@@ -727,24 +742,26 @@ def store_public_request(payload: PublicRequestCreate, background_tasks: Backgro
     note = payload.notes.strip()
     notes = (note + " · " if note else "") + "Согласие на обработку данных подтверждено на сайте."
     now = int(time.time())
+    status_token = secrets.token_urlsafe(16)
     with connect_db() as db:
         # A retry after a timeout or a double click must not create a second request.
         duplicate = execute_db(
             db,
-            """SELECT id FROM requests
+            """SELECT id, status_token FROM requests
                WHERE source = 'site' AND customer_contact = ? AND address = ?
                  AND preferred_time = ? AND created_at > ?
                ORDER BY id DESC LIMIT 1""",
             (contact, address, payload.preferred_date, now - 600),
         ).fetchone()
         if duplicate is not None:
-            return {"id": duplicate["id"], "status": "Новая"}
+            return {"id": duplicate["id"], "status": "Новая", "token": duplicate["status_token"]}
         request_id = execute_db(
             db,
             """INSERT INTO requests
                (service, address, preferred_time, customer_contact, notes, status,
-                created_at, customer_telegram_id, estimated_amount, source, additional_services_json, dirty_area_photo_count)
-               VALUES (?, ?, ?, ?, ?, 'Новая', ?, NULL, ?, 'site', ?, ?)""",
+                created_at, customer_telegram_id, estimated_amount, source, additional_services_json, dirty_area_photo_count,
+                status_token)
+               VALUES (?, ?, ?, ?, ?, 'Новая', ?, NULL, ?, 'site', ?, ?, ?)""",
             (
                 SERVICE_LABELS[payload.service_code],
                 address,
@@ -755,6 +772,7 @@ def store_public_request(payload: PublicRequestCreate, background_tasks: Backgro
                 amount,
                 extras_json,
                 len(payload.dirty_area_photos),
+                status_token,
             ),
             returning_id=True,
         )
@@ -775,7 +793,32 @@ def store_public_request(payload: PublicRequestCreate, background_tasks: Backgro
         payload.dirty_area_photos,
         request_id,
     )
-    return {"id": request_id, "status": "Новая"}
+    return {"id": request_id, "status": "Новая", "token": status_token}
+
+
+@app.get("/api/public-requests/{request_id}/status")
+def public_request_status(request_id: int, token: str, request: Request, response: Response):
+    """Status for the customer who sent the request from the site. Knowing id + secret token is the login."""
+    response.headers["Cache-Control"] = "no-store"
+    if not status_limiter.allow(client_ip(request)):
+        raise HTTPException(status_code=429, detail="Too many requests, try again later",
+                            headers={"Retry-After": "3600"})
+    with connect_db() as db:
+        row = execute_db(
+            db,
+            "SELECT status, created_at, status_token FROM requests WHERE id = ? AND source = 'site'",
+            (request_id,),
+        ).fetchone()
+    stored = (row["status_token"] if row else None) or ""
+    # One answer for "no such request" and "wrong token", compared in constant time.
+    if not row or not stored or not hmac.compare_digest(stored.encode(), token.encode()):
+        raise HTTPException(status_code=404, detail="Request not found")
+    return {
+        "id": request_id,
+        "status": row["status"],
+        "message": PUBLIC_STATUS_TEXT.get(row["status"], "Статус заявки обновлён."),
+        "created_at": row["created_at"],
+    }
 
 
 @app.post("/api/requests", status_code=201)

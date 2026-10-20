@@ -99,7 +99,8 @@ footer{border-top:1px solid var(--line);padding:25px 0;color:var(--muted);font-s
 <button class="btn" id="submit" type="submit">Отправить заявку</button>
 </form>
 </div>
-<div class="calc hidden" id="successBox" tabindex="-1" role="status"><h3 style="margin-top:0">✅ Заявка принята</h3><p id="successText"></p><button class="btn" id="again" type="button">Отправить ещё одну заявку</button></div>
+<div class="calc hidden" id="trackBox" tabindex="-1" role="status" aria-live="polite"><h3 style="margin-top:0">Статус заявки <span id="trackId"></span></h3><p class="price" id="trackStatus" style="margin:6px 0"></p><p id="trackMsg"></p><p class="muted hidden" id="trackNote"></p><button class="btn" id="trackRefresh" type="button">Обновить статус</button></div>
+<div class="calc hidden" id="successBox" tabindex="-1" role="status"><h3 style="margin-top:0">✅ Заявка принята</h3><p id="successText"></p><div id="trackLinkBox" class="hidden"><p class="muted" style="margin-bottom:6px">Сохраните ссылку, по ней можно в любой момент посмотреть статус заявки:</p><input id="trackLink" readonly aria-label="Ссылка на статус заявки" style="width:100%;padding:10px;border:1px solid #cbdcd2;border-radius:10px;font:inherit;margin-bottom:8px"><button class="btn" id="copyTrack" type="button" style="margin-bottom:14px">Скопировать ссылку</button></div><button class="btn" id="again" type="button">Отправить ещё одну заявку</button></div>
 <div class="contact-grid hidden" id="contacts"></div>
 </div></section>
 
@@ -294,6 +295,7 @@ $('#requestForm').addEventListener('submit', async event => {
     if (!response.ok) throw { status: response.status, data };
     $('#successText').textContent = (data.id ? 'Номер заявки: №' + data.id + '. ' : '') +
       'Мы свяжемся с вами (' + payload.channel.toLowerCase() + '), чтобы подтвердить стоимость и время.';
+    rememberTrack(data);
     $('#formBox').classList.add('hidden');
     $('#successBox').classList.remove('hidden');
     $('#successBox').focus();
@@ -325,6 +327,61 @@ $('#again').addEventListener('click', () => {
   if (/^[A-Za-z0-9_]{4,32}$/.test(tg)) add('✈ Telegram', '@' + tg, 'https://t.me/' + tg);
   if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(CONTACTS.email || '')) add('✉ Почта', CONTACTS.email, 'mailto:' + CONTACTS.email);
   if (box.children.length) box.classList.remove('hidden');
+})();
+
+// ---- Статус заявки: у клиента с сайта нет чата с ботом, поэтому статус открывается по секретной ссылке (#status=<номер>-<код>) ----
+const TRACK_KEY = 'lakoniya_track';
+function parseTrackHash() {
+  const m = /^#status=(\d+)-([A-Za-z0-9_-]{10,64})$/.exec(location.hash);
+  return m ? { id: Number(m[1]), token: m[2] } : null;
+}
+function saveTrack(t) { try { localStorage.setItem(TRACK_KEY, JSON.stringify(t)); } catch (_) {} }
+function loadTrack() {
+  try { const t = JSON.parse(localStorage.getItem(TRACK_KEY) || 'null'); return t && t.id && t.token ? t : null; } catch (_) { return null; }
+}
+function forgetTrack() { try { localStorage.removeItem(TRACK_KEY); } catch (_) {} }
+function trackUrl(t) { return location.origin + location.pathname + '#status=' + t.id + '-' + t.token; }
+function rememberTrack(data) {
+  if (!data || !data.id || !data.token) return;
+  const t = { id: data.id, token: data.token };
+  saveTrack(t);
+  $('#trackLink').value = trackUrl(t);
+  $('#trackLinkBox').classList.remove('hidden');
+}
+let currentTrack = null;
+async function refreshTrack() {
+  if (!currentTrack) return;
+  const note = $('#trackNote'); hide(note);
+  $('#trackId').textContent = '№' + currentTrack.id;
+  const slow = setTimeout(() => show(note, 'Сервер просыпается, это может занять до минуты…'), 6000);
+  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 75000);
+  try {
+    const response = await fetch(API_BASE + '/api/public-requests/' + currentTrack.id + '/status?token=' + encodeURIComponent(currentTrack.token), { signal: controller.signal, cache: 'no-store' });
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 404) { $('#trackStatus').textContent = 'Заявка не найдена'; $('#trackMsg').textContent = 'Проверьте ссылку: возможно, она скопирована не полностью.'; forgetTrack(); return; }
+    if (response.status === 429) { $('#trackMsg').textContent = 'Слишком много проверок подряд. Попробуйте чуть позже.'; return; }
+    if (!response.ok) throw new Error('status ' + response.status);
+    $('#trackStatus').textContent = data.status; $('#trackMsg').textContent = data.message || '';
+  } catch (_) {
+    $('#trackMsg').textContent = 'Не удалось получить статус. Попробуйте обновить через минуту.';
+  } finally { clearTimeout(slow); clearTimeout(timer); hide(note); }
+}
+function openTrack(t, focus) {
+  currentTrack = t; $('#trackBox').classList.remove('hidden');
+  $('#trackStatus').textContent = '…'; $('#trackMsg').textContent = '';
+  refreshTrack(); if (focus) $('#trackBox').focus();
+}
+$('#trackRefresh').addEventListener('click', refreshTrack);
+$('#copyTrack').addEventListener('click', async () => {
+  const input = $('#trackLink');
+  try { await navigator.clipboard.writeText(input.value); $('#copyTrack').textContent = 'Скопировано ✓'; }
+  catch (_) { input.select(); $('#copyTrack').textContent = 'Выделено, нажмите «Копировать»'; }
+});
+setInterval(() => { if (currentTrack && document.visibilityState === 'visible') refreshTrack(); }, 60000);
+(function initTrack() {
+  const fromLink = parseTrackHash();
+  if (fromLink) { saveTrack(fromLink); openTrack(fromLink, true); return; }
+  const stored = loadTrack(); if (stored) openTrack(stored, false);
 })();
 </script>
 </body></html>
