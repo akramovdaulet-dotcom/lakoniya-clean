@@ -146,9 +146,9 @@ def is_listing_or_provider_page(url: str, text: str) -> str | None:
         marker in path for marker in ("/order", "/request", "/zakaz", "/task")
     ):
         return "Каталог исполнителей Profi.ru, а не отдельная заявка"
-    if host in {"vk.com", "m.vk.com"} and not re.search(r"/wall-?\\d+_\\d+", path):
+    if host in {"vk.com", "m.vk.com"} and not re.search(r"/wall-?\d+_\d+", path):
         return "Профиль или страница сообщества ВКонтакте, а не отдельная публикация"
-    if host in {"t.me", "telegram.me"} and not re.search(r"/[^/]+/\\d+$", path):
+    if host in {"t.me", "telegram.me"} and not re.search(r"/[^/]+/\d+$", path):
         return "Страница канала/группы Telegram, а не отдельный пост"
     provider_phrases = (
         "наши услуги", "предлагаем услуги", "закажите уборку", "выполним уборку",
