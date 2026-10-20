@@ -98,7 +98,7 @@ def test_public_request_sends_photo_group_and_owner_text(monkeypatch):
     monkeypatch.setattr(app.global_limiter, "allow", lambda key: True)
     client = TestClient(app.app)
     photos = [data_url(), data_url()]
-    response = client.post("/api/public-requests", json=public_payload(dirty_area_photos=photos))
+    response = client.post("/api/public-requests", json=public_payload(phone="+79001230001", dirty_area_photos=photos))
     assert response.status_code == 201, response.text
     assert any("sendMessage" in url and "Фото: 2 шт. (оценка вручную)" in kwargs["json"]["text"] for url, kwargs in calls)
     media_calls = [(url, kwargs) for url, kwargs in calls if "sendMediaGroup" in url]
@@ -110,7 +110,7 @@ def test_public_request_without_photos_still_succeeds(monkeypatch):
     monkeypatch.setattr(app, "NOTIFY_OWNERS", False)
     monkeypatch.setattr(app.ip_limiter, "allow", lambda key: True)
     monkeypatch.setattr(app.global_limiter, "allow", lambda key: True)
-    response = TestClient(app.app).post("/api/public-requests", json=public_payload())
+    response = TestClient(app.app).post("/api/public-requests", json=public_payload(phone="+79001230002"))
     assert response.status_code == 201, response.text
 
 
