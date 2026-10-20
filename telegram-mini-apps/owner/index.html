@@ -110,6 +110,7 @@
       addField(card, 'Сумма (предварительно)', request.estimated_amount == null
         ? 'не рассчитана'
         : Number(request.estimated_amount).toLocaleString('ru-RU') + ' ₽');
+      if (request.dirty_area_photo_count) addField(card, 'Фото загрязнений', request.dirty_area_photo_count + ' шт. (смотрите в чате бота, оценка вручную)');
       addField(card, 'Контакт клиента', request.customer_contact);
       if (request.notes) addField(card, 'Комментарий', request.notes);
       const actions = element('div', 'actions');

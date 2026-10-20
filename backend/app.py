@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import sqlite3
 import time
 from collections import deque
@@ -13,11 +14,12 @@ from pathlib import Path
 from urllib.parse import parse_qsl
 
 import httpx
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 def clean_token(value: str) -> str:
     """Strip whitespace, newlines and wrapping quotes pasted into a host's env UI.
@@ -145,6 +147,8 @@ def initialize_db():
         # JSON snapshot of selected extra services and quantities.
         add_column_if_missing(db, "requests", "additional_services_json", "TEXT")
         add_column_if_missing(db, "requests", "dirty_area_photo_count", "INTEGER NOT NULL DEFAULT 0")
+        # Secret of the customer's status link (site requests only; the customer has no Telegram chat).
+        add_column_if_missing(db, "requests", "status_token", "TEXT")
 
 
 def add_column_if_missing(db, table: str, column: str, column_type: str) -> None:
@@ -341,6 +345,8 @@ PHONE_ALLOWED = re.compile(r"\+?[0-9 ()\-]+")
 
 
 MAX_PHOTO_BYTES = 3 * 1024 * 1024
+# 10 MB of photos is ~13.4 MB as base64 inside JSON, so the body cap must be larger.
+MAX_PUBLIC_BODY_BYTES = 15 * 1024 * 1024
 MAX_PHOTOS_TOTAL_BYTES = 10 * 1024 * 1024
 PHOTO_SIGNATURES = {
     "image/jpeg": lambda data: data.startswith(bytes.fromhex("FFD8FF")),
@@ -383,12 +389,6 @@ class RequestCreate(BaseModel):
     service_code: str | None = Field(default=None, max_length=20)
     area: int | None = Field(default=None, ge=MIN_AREA, le=MAX_AREA)
     additional_services: dict[str, int] = Field(default_factory=dict)
-    dirty_area_photos: list[str] = Field(default_factory=list, max_length=5)
-
-    @field_validator("dirty_area_photos")
-    @classmethod
-    def validate_dirty_area_photos_field(cls, value):
-        return validate_dirty_area_photos(value)
 
     @field_validator("additional_services")
     @classmethod
@@ -518,6 +518,18 @@ def _env_int(name: str, default: int) -> int:
 # Per visitor and overall caps for the public form (requests per hour).
 ip_limiter = SlidingWindowLimiter(_env_int("PUBLIC_RATE_LIMIT_PER_HOUR", 5), 3600)
 global_limiter = SlidingWindowLimiter(_env_int("PUBLIC_RATE_LIMIT_GLOBAL_PER_HOUR", 60), 3600)
+# Status page polling and token guessing are limited per visitor.
+status_limiter = SlidingWindowLimiter(_env_int("PUBLIC_STATUS_LIMIT_PER_HOUR", 120), 3600)
+
+PUBLIC_STATUS_TEXT = {
+    "Новая": "Заявка принята. Мы скоро свяжемся с вами.",
+    "В обработке": "Заявка в обработке.",
+    "Передана сотруднику": "Заявка передана сотруднику, он свяжется с вами.",
+    "Подтверждена": "Заявка подтверждена. Ждём вас в назначенное время.",
+    "В работе": "Уборка выполняется.",
+    "Завершена": "Заявка выполнена. Спасибо!",
+    "Отменена": "Заявка отменена.",
+}
 
 
 def client_ip(request) -> str:
@@ -704,10 +716,22 @@ def pricing():
     }
 
 
+async def read_limited_body(request: Request, limit: int) -> bytes:
+    """Read the body without ever holding more than `limit` bytes (also for chunked uploads)."""
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise HTTPException(status_code=413, detail="Request body too large")
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            raise HTTPException(status_code=413, detail="Request body too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @app.post("/api/public-requests", status_code=201)
-async def create_public_request(
-    request: Request, background_tasks: BackgroundTasks
-):
+async def create_public_request(request: Request, background_tasks: BackgroundTasks):
     """Request from the public website: stored, then sent to the owners' Telegram bot."""
     if not ip_limiter.allow(client_ip(request)) or not global_limiter.allow("all"):
         notify_logger.warning("Public request rejected: rate limit")
@@ -716,18 +740,17 @@ async def create_public_request(
             detail="Too many requests, try again later",
             headers={"Retry-After": "3600"},
         )
-    content_length = request.headers.get("content-length", "")
-    if content_length.isdigit() and int(content_length) > 12 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="Request body too large")
-    raw_body = await request.body()
-    if len(raw_body) > 12 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="Request body too large")
-    from pydantic import ValidationError
+    raw_body = await read_limited_body(request, MAX_PUBLIC_BODY_BYTES)
     try:
         payload = PublicRequestCreate.model_validate_json(raw_body)
     except ValidationError as exc:
-        errors = [{k: v for k, v in error.items() if k not in {"input", "ctx"}} for error in exc.errors()]
+        errors = [{k: v for k, v in error.items() if k not in {"input", "ctx", "url"}} for error in exc.errors()]
         raise HTTPException(status_code=422, detail=errors) from None
+    # Blocking database work runs in a worker thread, not in the event loop.
+    return await run_in_threadpool(store_public_request, payload, background_tasks)
+
+
+def store_public_request(payload: PublicRequestCreate, background_tasks: BackgroundTasks) -> dict:
     if payload.website.strip():
         # Honeypot filled: pretend success so the bot learns nothing, store nothing.
         notify_logger.info("Public request ignored: honeypot field filled")
@@ -742,24 +765,26 @@ async def create_public_request(
     note = payload.notes.strip()
     notes = (note + " · " if note else "") + "Согласие на обработку данных подтверждено на сайте."
     now = int(time.time())
+    status_token = secrets.token_urlsafe(16)
     with connect_db() as db:
         # A retry after a timeout or a double click must not create a second request.
         duplicate = execute_db(
             db,
-            """SELECT id FROM requests
+            """SELECT id, status_token FROM requests
                WHERE source = 'site' AND customer_contact = ? AND address = ?
                  AND preferred_time = ? AND created_at > ?
                ORDER BY id DESC LIMIT 1""",
             (contact, address, payload.preferred_date, now - 600),
         ).fetchone()
         if duplicate is not None:
-            return {"id": duplicate["id"], "status": "Новая"}
+            return {"id": duplicate["id"], "status": "Новая", "token": duplicate["status_token"]}
         request_id = execute_db(
             db,
             """INSERT INTO requests
                (service, address, preferred_time, customer_contact, notes, status,
-                created_at, customer_telegram_id, estimated_amount, source, additional_services_json, dirty_area_photo_count)
-               VALUES (?, ?, ?, ?, ?, 'Новая', ?, NULL, ?, 'site', ?, ?)""",
+                created_at, customer_telegram_id, estimated_amount, source, additional_services_json, dirty_area_photo_count,
+                status_token)
+               VALUES (?, ?, ?, ?, ?, 'Новая', ?, NULL, ?, 'site', ?, ?, ?)""",
             (
                 SERVICE_LABELS[payload.service_code],
                 address,
@@ -770,6 +795,7 @@ async def create_public_request(
                 amount,
                 extras_json,
                 len(payload.dirty_area_photos),
+                status_token,
             ),
             returning_id=True,
         )
@@ -790,7 +816,32 @@ async def create_public_request(
         payload.dirty_area_photos,
         request_id,
     )
-    return {"id": request_id, "status": "Новая"}
+    return {"id": request_id, "status": "Новая", "token": status_token}
+
+
+@app.get("/api/public-requests/{request_id}/status")
+def public_request_status(request_id: int, token: str, request: Request, response: Response):
+    """Status for the customer who sent the request from the site. Knowing id + secret token is the login."""
+    response.headers["Cache-Control"] = "no-store"
+    if not status_limiter.allow(client_ip(request)):
+        raise HTTPException(status_code=429, detail="Too many requests, try again later",
+                            headers={"Retry-After": "3600"})
+    with connect_db() as db:
+        row = execute_db(
+            db,
+            "SELECT status, created_at, status_token FROM requests WHERE id = ? AND source = 'site'",
+            (request_id,),
+        ).fetchone()
+    stored = (row["status_token"] if row else None) or ""
+    # One answer for "no such request" and "wrong token", compared in constant time.
+    if not row or not stored or not hmac.compare_digest(stored.encode(), token.encode()):
+        raise HTTPException(status_code=404, detail="Request not found")
+    return {
+        "id": request_id,
+        "status": row["status"],
+        "message": PUBLIC_STATUS_TEXT.get(row["status"], "Статус заявки обновлён."),
+        "created_at": row["created_at"],
+    }
 
 
 @app.post("/api/requests", status_code=201)
@@ -896,7 +947,8 @@ def list_requests(_: dict = Depends(owner_user)):
         rows = execute_db(
             db,
             """SELECT id, service, address, preferred_time, customer_contact,
-                      notes, status, created_at, estimated_amount, source
+                      notes, status, created_at, estimated_amount, source,
+                      dirty_area_photo_count
                FROM requests ORDER BY created_at DESC LIMIT 500"""
         ).fetchall()
     return {"requests": [dict(row) for row in rows]}

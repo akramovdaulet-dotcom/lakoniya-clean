@@ -99,7 +99,8 @@ footer{border-top:1px solid var(--line);padding:25px 0;color:var(--muted);font-s
 <button class="btn" id="submit" type="submit">Отправить заявку</button>
 </form>
 </div>
-<div class="calc hidden" id="successBox" tabindex="-1" role="status"><h3 style="margin-top:0">✅ Заявка принята</h3><p id="successText"></p><button class="btn" id="again" type="button">Отправить ещё одну заявку</button></div>
+<div class="calc hidden" id="trackBox" tabindex="-1" role="status" aria-live="polite"><h3 style="margin-top:0">Статус заявки <span id="trackId"></span></h3><p class="price" id="trackStatus" style="margin:6px 0"></p><p id="trackMsg"></p><p class="muted hidden" id="trackNote"></p><button class="btn" id="trackRefresh" type="button">Обновить статус</button></div>
+<div class="calc hidden" id="successBox" tabindex="-1" role="status"><h3 style="margin-top:0">✅ Заявка принята</h3><p id="successText"></p><div id="trackLinkBox" class="hidden"><p class="muted" style="margin-bottom:6px">Сохраните ссылку, по ней можно в любой момент посмотреть статус заявки:</p><input id="trackLink" readonly aria-label="Ссылка на статус заявки" style="width:100%;padding:10px;border:1px solid #cbdcd2;border-radius:10px;font:inherit;margin-bottom:8px"><button class="btn" id="copyTrack" type="button" style="margin-bottom:14px">Скопировать ссылку</button></div><button class="btn" id="again" type="button">Отправить ещё одну заявку</button></div>
 <div class="contact-grid hidden" id="contacts"></div>
 </div></section>
 
@@ -120,7 +121,7 @@ const FALLBACK = {
 };
 let pricing = FALLBACK;
 const $ = s => document.querySelector(s);
-const FIELD_NAMES = { name: 'имя', phone: 'телефон', channel: 'способ связи', service_code: 'тип уборки', area: 'площадь', district: 'район', address: 'адрес', preferred_date: 'дату', notes: 'комментарий', consent: 'согласие на обработку данных' };
+const FIELD_NAMES = { name: 'имя', phone: 'телефон', channel: 'способ связи', service_code: 'тип уборки', area: 'площадь', district: 'район', address: 'адрес', preferred_date: 'дату', notes: 'комментарий', consent: 'согласие на обработку данных', dirty_area_photos: 'фото' };
 
 function areaNumber() {
   const n = Math.round(Number($('#area').value));
@@ -190,16 +191,16 @@ function validate() {
     district: $('#district').value,
     preferred_date: $('#date').value,
     notes: $('#details').value.trim(),
-    dirty_area_photos: window.dirtyAreaPhotoData || [],
     consent: true,
     website: $('#website').value
   };
 }
 
 function messageFor(error) {
+  if (error && error.status === 413) return 'Фото слишком тяжёлые для отправки. Уберите часть фото или выберите меньше.';
   if (error && error.status === 429) return 'С вашего адреса отправлено слишком много заявок. Попробуйте позже.';
   if (error && error.status === 422 && Array.isArray(error.data && error.data.detail)) {
-    const names = [...new Set(error.data.detail.map(item => FIELD_NAMES[item.loc && item.loc[item.loc.length - 1]]).filter(Boolean))];
+    const names = [...new Set(error.data.detail.map(item => FIELD_NAMES[(item.loc || []).filter(part => typeof part === 'string').pop()]).filter(Boolean))];
     if (names.length) return 'Проверьте поля: ' + names.join(', ') + '.';
   }
   if (error && error.status) return 'Не удалось отправить заявку (ошибка ' + error.status + '). Попробуйте ещё раз чуть позже.';
@@ -210,6 +211,8 @@ let selectedDirtyPhotos = [];
 const photoInput = $('#dirtyPhotos');
 function renderPhotoPreviews() {
   const container = $('#photoPreviews');
+  $('label[for="dirtyPhotos"]').textContent = 'Фото загрязнённых участков (необязательно, до 5 фото)' +
+    (selectedDirtyPhotos.length ? ' — выбрано ' + selectedDirtyPhotos.length + ' из 5' + (selectedDirtyPhotos.length < 5 ? ', можно добавить ещё' : '') : '');
   container.replaceChildren();
   selectedDirtyPhotos.forEach((file, index) => {
     const card = document.createElement('div'); card.className = 'photo-preview';
@@ -217,24 +220,24 @@ function renderPhotoPreviews() {
     image.src = URL.createObjectURL(file);
     image.onload = () => URL.revokeObjectURL(image.src);
     const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Убрать';
-    remove.addEventListener('click', () => {
-      selectedDirtyPhotos.splice(index, 1);
-      const transfer = new DataTransfer();
-      selectedDirtyPhotos.forEach(item => transfer.items.add(item));
-      photoInput.files = transfer.files;
-      renderPhotoPreviews();
-    });
+    remove.addEventListener('click', () => { selectedDirtyPhotos.splice(index, 1); hide($('#photoError')); renderPhotoPreviews(); });
     card.append(image, remove); container.append(card);
   });
 }
+// Every pick ADDS to the list (phones often let you choose only one photo at a time).
 photoInput.addEventListener('change', () => {
   hide($('#photoError'));
   const chosen = Array.from(photoInput.files || []);
-  if (chosen.length > 5) { show($('#photoError'), 'Можно прикрепить не больше 5 фотографий.'); photoInput.value = ''; selectedDirtyPhotos = []; renderPhotoPreviews(); return; }
+  photoInput.value = ''; // lets the same file be picked again later
   if (chosen.some(file => !['image/jpeg','image/png','image/webp'].includes(file.type) || !file.size)) {
-    show($('#photoError'), 'Допустимы только JPEG, PNG или WebP.'); photoInput.value = ''; selectedDirtyPhotos = []; renderPhotoPreviews(); return;
+    show($('#photoError'), 'Допустимы только JPEG, PNG или WebP.'); return;
   }
-  selectedDirtyPhotos = chosen; renderPhotoPreviews();
+  const known = new Set(selectedDirtyPhotos.map(f => f.name + '|' + f.size + '|' + f.lastModified));
+  const fresh = chosen.filter(f => !known.has(f.name + '|' + f.size + '|' + f.lastModified));
+  const room = 5 - selectedDirtyPhotos.length;
+  if (fresh.length > room) show($('#photoError'), 'Можно прикрепить не больше 5 фотографий, лишние не добавлены.');
+  selectedDirtyPhotos = selectedDirtyPhotos.concat(fresh.slice(0, room));
+  renderPhotoPreviews();
 });
 function compressPhoto(file) {
   return new Promise((resolve, reject) => {
@@ -248,6 +251,7 @@ function compressPhoto(file) {
       canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
       const context = canvas.getContext('2d');
       if (!context) { reject(new Error('canvas unavailable')); return; }
+      context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height); // transparent PNG -> white, not black
       context.drawImage(image, 0, 0, canvas.width, canvas.height);
       canvas.toBlob(blob => {
         if (!blob) { reject(new Error('compression failed')); return; }
@@ -291,6 +295,7 @@ $('#requestForm').addEventListener('submit', async event => {
     if (!response.ok) throw { status: response.status, data };
     $('#successText').textContent = (data.id ? 'Номер заявки: №' + data.id + '. ' : '') +
       'Мы свяжемся с вами (' + payload.channel.toLowerCase() + '), чтобы подтвердить стоимость и время.';
+    rememberTrack(data);
     $('#formBox').classList.add('hidden');
     $('#successBox').classList.remove('hidden');
     $('#successBox').focus();
@@ -329,6 +334,61 @@ $('#again').addEventListener('click', () => {
   }
   if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(CONTACTS.email || '')) add('✉ Почта', CONTACTS.email, 'mailto:' + CONTACTS.email);
   if (box.children.length) box.classList.remove('hidden');
+})();
+
+// ---- Статус заявки: у клиента с сайта нет чата с ботом, поэтому статус открывается по секретной ссылке (#status=<номер>-<код>) ----
+const TRACK_KEY = 'lakoniya_track';
+function parseTrackHash() {
+  const m = /^#status=(\d+)-([A-Za-z0-9_-]{10,64})$/.exec(location.hash);
+  return m ? { id: Number(m[1]), token: m[2] } : null;
+}
+function saveTrack(t) { try { localStorage.setItem(TRACK_KEY, JSON.stringify(t)); } catch (_) {} }
+function loadTrack() {
+  try { const t = JSON.parse(localStorage.getItem(TRACK_KEY) || 'null'); return t && t.id && t.token ? t : null; } catch (_) { return null; }
+}
+function forgetTrack() { try { localStorage.removeItem(TRACK_KEY); } catch (_) {} }
+function trackUrl(t) { return location.origin + location.pathname + '#status=' + t.id + '-' + t.token; }
+function rememberTrack(data) {
+  if (!data || !data.id || !data.token) return;
+  const t = { id: data.id, token: data.token };
+  saveTrack(t);
+  $('#trackLink').value = trackUrl(t);
+  $('#trackLinkBox').classList.remove('hidden');
+}
+let currentTrack = null;
+async function refreshTrack() {
+  if (!currentTrack) return;
+  const note = $('#trackNote'); hide(note);
+  $('#trackId').textContent = '№' + currentTrack.id;
+  const slow = setTimeout(() => show(note, 'Сервер просыпается, это может занять до минуты…'), 6000);
+  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 75000);
+  try {
+    const response = await fetch(API_BASE + '/api/public-requests/' + currentTrack.id + '/status?token=' + encodeURIComponent(currentTrack.token), { signal: controller.signal, cache: 'no-store' });
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 404) { $('#trackStatus').textContent = 'Заявка не найдена'; $('#trackMsg').textContent = 'Проверьте ссылку: возможно, она скопирована не полностью.'; forgetTrack(); return; }
+    if (response.status === 429) { $('#trackMsg').textContent = 'Слишком много проверок подряд. Попробуйте чуть позже.'; return; }
+    if (!response.ok) throw new Error('status ' + response.status);
+    $('#trackStatus').textContent = data.status; $('#trackMsg').textContent = data.message || '';
+  } catch (_) {
+    $('#trackMsg').textContent = 'Не удалось получить статус. Попробуйте обновить через минуту.';
+  } finally { clearTimeout(slow); clearTimeout(timer); hide(note); }
+}
+function openTrack(t, focus) {
+  currentTrack = t; $('#trackBox').classList.remove('hidden');
+  $('#trackStatus').textContent = '…'; $('#trackMsg').textContent = '';
+  refreshTrack(); if (focus) $('#trackBox').focus();
+}
+$('#trackRefresh').addEventListener('click', refreshTrack);
+$('#copyTrack').addEventListener('click', async () => {
+  const input = $('#trackLink');
+  try { await navigator.clipboard.writeText(input.value); $('#copyTrack').textContent = 'Скопировано ✓'; }
+  catch (_) { input.select(); $('#copyTrack').textContent = 'Выделено, нажмите «Копировать»'; }
+});
+setInterval(() => { if (currentTrack && document.visibilityState === 'visible') refreshTrack(); }, 60000);
+(function initTrack() {
+  const fromLink = parseTrackHash();
+  if (fromLink) { saveTrack(fromLink); openTrack(fromLink, true); return; }
+  const stored = loadTrack(); if (stored) openTrack(stored, false);
 })();
 </script>
 </body></html>
