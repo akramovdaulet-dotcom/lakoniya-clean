@@ -70,12 +70,9 @@ def test_public_request_rejects_total_over_ten_megabytes():
         app.PublicRequestCreate(**valid_payload(dirty_area_photos=photos))
 
 
-def test_request_create_uses_same_photo_validator():
-    model = app.RequestCreate(
-        service="Тест", address="Тестовый адрес", preferred_time="завтра",
-        customer_contact="тест", dirty_area_photos=[data_url()],
-    )
-    assert len(model.dirty_area_photos) == 1
+def test_mini_app_request_model_has_no_photo_field():
+    """The Mini App path never carries photos: the field must not exist, so nothing is silently dropped."""
+    assert "dirty_area_photos" not in app.RequestCreate.model_fields
 
 
 def public_payload(**overrides):
@@ -129,3 +126,55 @@ def test_photo_validation_error_never_echoes_base64():
     assert response.status_code == 422
     assert secret_photo_data not in response.text
     assert base64.b64encode(b"private-photo-content").decode() not in response.text
+
+
+def _open_limits(monkeypatch):
+    monkeypatch.setattr(app, "NOTIFY_OWNERS", False)
+    monkeypatch.setattr(app.ip_limiter, "allow", lambda key: True)
+    monkeypatch.setattr(app.global_limiter, "allow", lambda key: True)
+
+
+def test_public_request_body_over_limit_is_rejected_with_413(monkeypatch):
+    _open_limits(monkeypatch)
+    monkeypatch.setattr(app, "MAX_PUBLIC_BODY_BYTES", 2000)
+    response = TestClient(app.app).post("/api/public-requests", json=public_payload(notes="x" * 900, address="а" * 1500))
+    assert response.status_code == 413
+
+
+def test_public_request_body_limit_also_applies_to_chunked_upload(monkeypatch):
+    _open_limits(monkeypatch)
+    monkeypatch.setattr(app, "MAX_PUBLIC_BODY_BYTES", 2000)
+
+    def chunks():
+        for _ in range(5):
+            yield b"x" * 1000  # no Content-Length: the size is only known while reading
+
+    response = TestClient(app.app).post(
+        "/api/public-requests", content=chunks(), headers={"content-type": "application/json"}
+    )
+    assert response.status_code == 413
+
+
+def test_body_limit_fits_the_largest_allowed_photo_set():
+    biggest_json = app.MAX_PHOTOS_TOTAL_BYTES * 4 // 3 + 10_000  # base64 + the rest of the JSON
+    assert app.MAX_PUBLIC_BODY_BYTES > biggest_json
+
+
+def test_png_photo_with_valid_signature_is_accepted():
+    png = bytes.fromhex("89504E470D0A1A0A") + b"png-body"
+    assert len(app.PublicRequestCreate(**valid_payload(dirty_area_photos=[data_url("image/png", png)])).dirty_area_photos) == 1
+
+
+def test_owner_list_reports_photo_count(monkeypatch):
+    _open_limits(monkeypatch)
+    phone = "+7900" + str(int(__import__("time").time() * 1000))[-7:]
+    created = TestClient(app.app).post(
+        "/api/public-requests",
+        json=public_payload(phone=phone, address="Уфа, Фото-тест " + phone, dirty_area_photos=[data_url()] * 3),
+    )
+    assert created.status_code == 201, created.text
+    request_id = created.json()["id"]
+    listed = app.list_requests({})["requests"]
+    item = next(row for row in listed if row["id"] == request_id)
+    assert item["dirty_area_photo_count"] == 3
+    assert "customer_telegram_id" not in item

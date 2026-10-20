@@ -14,10 +14,11 @@ from urllib.parse import parse_qsl
 
 import httpx
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 def clean_token(value: str) -> str:
     """Strip whitespace, newlines and wrapping quotes pasted into a host's env UI.
@@ -318,6 +319,8 @@ PHONE_ALLOWED = re.compile(r"\+?[0-9 ()\-]+")
 
 
 MAX_PHOTO_BYTES = 3 * 1024 * 1024
+# 10 MB of photos is ~13.4 MB as base64 inside JSON, so the body cap must be larger.
+MAX_PUBLIC_BODY_BYTES = 15 * 1024 * 1024
 MAX_PHOTOS_TOTAL_BYTES = 10 * 1024 * 1024
 PHOTO_SIGNATURES = {
     "image/jpeg": lambda data: data.startswith(bytes.fromhex("FFD8FF")),
@@ -360,12 +363,6 @@ class RequestCreate(BaseModel):
     service_code: str | None = Field(default=None, max_length=20)
     area: int | None = Field(default=None, ge=MIN_AREA, le=MAX_AREA)
     additional_services: dict[str, int] = Field(default_factory=dict)
-    dirty_area_photos: list[str] = Field(default_factory=list, max_length=5)
-
-    @field_validator("dirty_area_photos")
-    @classmethod
-    def validate_dirty_area_photos_field(cls, value):
-        return validate_dirty_area_photos(value)
 
     @field_validator("additional_services")
     @classmethod
@@ -681,10 +678,22 @@ def pricing():
     }
 
 
+async def read_limited_body(request: Request, limit: int) -> bytes:
+    """Read the body without ever holding more than `limit` bytes (also for chunked uploads)."""
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise HTTPException(status_code=413, detail="Request body too large")
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            raise HTTPException(status_code=413, detail="Request body too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @app.post("/api/public-requests", status_code=201)
-async def create_public_request(
-    request: Request, background_tasks: BackgroundTasks
-):
+async def create_public_request(request: Request, background_tasks: BackgroundTasks):
     """Request from the public website: stored, then sent to the owners' Telegram bot."""
     if not ip_limiter.allow(client_ip(request)) or not global_limiter.allow("all"):
         notify_logger.warning("Public request rejected: rate limit")
@@ -693,18 +702,17 @@ async def create_public_request(
             detail="Too many requests, try again later",
             headers={"Retry-After": "3600"},
         )
-    content_length = request.headers.get("content-length", "")
-    if content_length.isdigit() and int(content_length) > 12 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="Request body too large")
-    raw_body = await request.body()
-    if len(raw_body) > 12 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="Request body too large")
-    from pydantic import ValidationError
+    raw_body = await read_limited_body(request, MAX_PUBLIC_BODY_BYTES)
     try:
         payload = PublicRequestCreate.model_validate_json(raw_body)
     except ValidationError as exc:
-        errors = [{k: v for k, v in error.items() if k not in {"input", "ctx"}} for error in exc.errors()]
+        errors = [{k: v for k, v in error.items() if k not in {"input", "ctx", "url"}} for error in exc.errors()]
         raise HTTPException(status_code=422, detail=errors) from None
+    # Blocking database work runs in a worker thread, not in the event loop.
+    return await run_in_threadpool(store_public_request, payload, background_tasks)
+
+
+def store_public_request(payload: PublicRequestCreate, background_tasks: BackgroundTasks) -> dict:
     if payload.website.strip():
         # Honeypot filled: pretend success so the bot learns nothing, store nothing.
         notify_logger.info("Public request ignored: honeypot field filled")
@@ -873,7 +881,8 @@ def list_requests(_: dict = Depends(owner_user)):
         rows = execute_db(
             db,
             """SELECT id, service, address, preferred_time, customer_contact,
-                      notes, status, created_at, estimated_amount, source
+                      notes, status, created_at, estimated_amount, source,
+                      dirty_area_photo_count
                FROM requests ORDER BY created_at DESC LIMIT 500"""
         ).fetchall()
     return {"requests": [dict(row) for row in rows]}
