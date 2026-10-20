@@ -86,6 +86,22 @@ def public_payload(**overrides):
 
 
 def test_public_request_sends_photo_group_and_owner_text(monkeypatch):
+    notifications = []
+    monkeypatch.setattr(app, "notify_owners", lambda text, photos=None, request_id=None: notifications.append((text, photos, request_id)))
+    monkeypatch.setattr(app.ip_limiter, "allow", lambda key: True)
+    monkeypatch.setattr(app.global_limiter, "allow", lambda key: True)
+    client = TestClient(app.app)
+    photos = [data_url(), data_url()]
+    response = client.post("/api/public-requests", json=public_payload(phone="+79001230003", dirty_area_photos=photos))
+    assert response.status_code == 201, response.text
+    assert notifications
+    text, sent_photos, request_id = notifications[-1]
+    assert "Фото: 2 шт. (оценка вручную)" in text
+    assert sent_photos == photos
+    assert isinstance(request_id, int)
+
+
+def test_owner_photo_notification_uses_media_group(monkeypatch):
     calls = []
     def fake_post(url, **kwargs):
         calls.append((url, kwargs))
@@ -94,17 +110,11 @@ def test_public_request_sends_photo_group_and_owner_text(monkeypatch):
     monkeypatch.setattr(app, "NOTIFY_OWNERS", True)
     monkeypatch.setattr(app, "OWNER_BOT_TOKEN", "test-token")
     monkeypatch.setattr(app, "OWNER_IDS", {12345})
-    monkeypatch.setattr(app.ip_limiter, "allow", lambda key: True)
-    monkeypatch.setattr(app.global_limiter, "allow", lambda key: True)
-    client = TestClient(app.app)
-    photos = [data_url(), data_url()]
-    response = client.post("/api/public-requests", json=public_payload(phone="+79001230001", dirty_area_photos=photos))
-    assert response.status_code == 201, response.text
+    app.notify_owners("Заявка №77\nФото: 2 шт. (оценка вручную)", [data_url(), data_url()], 77)
     assert any("sendMessage" in url and "Фото: 2 шт. (оценка вручную)" in kwargs["json"]["text"] for url, kwargs in calls)
     media_calls = [(url, kwargs) for url, kwargs in calls if "sendMediaGroup" in url]
     assert len(media_calls) == 1
-    assert "Заявка №" in media_calls[0][1]["data"]["media"]
-
+    assert "Заявка №77" in media_calls[0][1]["data"]["media"]
 
 def test_public_request_without_photos_still_succeeds(monkeypatch):
     monkeypatch.setattr(app, "NOTIFY_OWNERS", False)
