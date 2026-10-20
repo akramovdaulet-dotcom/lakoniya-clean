@@ -120,7 +120,7 @@ const FALLBACK = {
 };
 let pricing = FALLBACK;
 const $ = s => document.querySelector(s);
-const FIELD_NAMES = { name: 'имя', phone: 'телефон', channel: 'способ связи', service_code: 'тип уборки', area: 'площадь', district: 'район', address: 'адрес', preferred_date: 'дату', notes: 'комментарий', consent: 'согласие на обработку данных' };
+const FIELD_NAMES = { name: 'имя', phone: 'телефон', channel: 'способ связи', service_code: 'тип уборки', area: 'площадь', district: 'район', address: 'адрес', preferred_date: 'дату', notes: 'комментарий', consent: 'согласие на обработку данных', dirty_area_photos: 'фото' };
 
 function areaNumber() {
   const n = Math.round(Number($('#area').value));
@@ -190,16 +190,16 @@ function validate() {
     district: $('#district').value,
     preferred_date: $('#date').value,
     notes: $('#details').value.trim(),
-    dirty_area_photos: window.dirtyAreaPhotoData || [],
     consent: true,
     website: $('#website').value
   };
 }
 
 function messageFor(error) {
+  if (error && error.status === 413) return 'Фото слишком тяжёлые для отправки. Уберите часть фото или выберите меньше.';
   if (error && error.status === 429) return 'С вашего адреса отправлено слишком много заявок. Попробуйте позже.';
   if (error && error.status === 422 && Array.isArray(error.data && error.data.detail)) {
-    const names = [...new Set(error.data.detail.map(item => FIELD_NAMES[item.loc && item.loc[item.loc.length - 1]]).filter(Boolean))];
+    const names = [...new Set(error.data.detail.map(item => FIELD_NAMES[(item.loc || []).filter(part => typeof part === 'string').pop()]).filter(Boolean))];
     if (names.length) return 'Проверьте поля: ' + names.join(', ') + '.';
   }
   if (error && error.status) return 'Не удалось отправить заявку (ошибка ' + error.status + '). Попробуйте ещё раз чуть позже.';
@@ -248,6 +248,7 @@ function compressPhoto(file) {
       canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
       const context = canvas.getContext('2d');
       if (!context) { reject(new Error('canvas unavailable')); return; }
+      context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height); // transparent PNG -> white, not black
       context.drawImage(image, 0, 0, canvas.width, canvas.height);
       canvas.toBlob(blob => {
         if (!blob) { reject(new Error('compression failed')); return; }
