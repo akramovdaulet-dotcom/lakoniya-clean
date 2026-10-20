@@ -210,6 +210,8 @@ let selectedDirtyPhotos = [];
 const photoInput = $('#dirtyPhotos');
 function renderPhotoPreviews() {
   const container = $('#photoPreviews');
+  $('label[for="dirtyPhotos"]').textContent = 'Фото загрязнённых участков (необязательно, до 5 фото)' +
+    (selectedDirtyPhotos.length ? ' — выбрано ' + selectedDirtyPhotos.length + ' из 5' + (selectedDirtyPhotos.length < 5 ? ', можно добавить ещё' : '') : '');
   container.replaceChildren();
   selectedDirtyPhotos.forEach((file, index) => {
     const card = document.createElement('div'); card.className = 'photo-preview';
@@ -217,24 +219,24 @@ function renderPhotoPreviews() {
     image.src = URL.createObjectURL(file);
     image.onload = () => URL.revokeObjectURL(image.src);
     const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Убрать';
-    remove.addEventListener('click', () => {
-      selectedDirtyPhotos.splice(index, 1);
-      const transfer = new DataTransfer();
-      selectedDirtyPhotos.forEach(item => transfer.items.add(item));
-      photoInput.files = transfer.files;
-      renderPhotoPreviews();
-    });
+    remove.addEventListener('click', () => { selectedDirtyPhotos.splice(index, 1); hide($('#photoError')); renderPhotoPreviews(); });
     card.append(image, remove); container.append(card);
   });
 }
+// Every pick ADDS to the list (phones often let you choose only one photo at a time).
 photoInput.addEventListener('change', () => {
   hide($('#photoError'));
   const chosen = Array.from(photoInput.files || []);
-  if (chosen.length > 5) { show($('#photoError'), 'Можно прикрепить не больше 5 фотографий.'); photoInput.value = ''; selectedDirtyPhotos = []; renderPhotoPreviews(); return; }
+  photoInput.value = ''; // lets the same file be picked again later
   if (chosen.some(file => !['image/jpeg','image/png','image/webp'].includes(file.type) || !file.size)) {
-    show($('#photoError'), 'Допустимы только JPEG, PNG или WebP.'); photoInput.value = ''; selectedDirtyPhotos = []; renderPhotoPreviews(); return;
+    show($('#photoError'), 'Допустимы только JPEG, PNG или WebP.'); return;
   }
-  selectedDirtyPhotos = chosen; renderPhotoPreviews();
+  const known = new Set(selectedDirtyPhotos.map(f => f.name + '|' + f.size + '|' + f.lastModified));
+  const fresh = chosen.filter(f => !known.has(f.name + '|' + f.size + '|' + f.lastModified));
+  const room = 5 - selectedDirtyPhotos.length;
+  if (fresh.length > room) show($('#photoError'), 'Можно прикрепить не больше 5 фотографий, лишние не добавлены.');
+  selectedDirtyPhotos = selectedDirtyPhotos.concat(fresh.slice(0, room));
+  renderPhotoPreviews();
 });
 function compressPhoto(file) {
   return new Promise((resolve, reject) => {
