@@ -211,3 +211,21 @@ def test_vk_post_url_is_distinguished_from_community_profile():
     # The URL alone is not enough to confirm a lead; a real post still needs
     # intent, locality and publication date evidence.
     assert post["status"] == "Подтверждённый кандидат"
+
+
+def test_rejects_indexed_competitor_landing_page():
+    lead = classify_result(request(
+        url="https://cleanbros.ru/ufa",
+        title="Клининговые услуги в Уфе: квартиры, дома и офисы",
+        description="Сколько стоит уборка квартиры в Уфе? Стоимость уборки квартиры начинается от 3000 рублей.",
+    ))
+    assert lead["status"] == "Отклонён"
+
+
+def test_rejects_cleaning_directory_with_ad_count():
+    lead = classify_result(request(
+        url="https://pomogatel.ru/ufa/uborka-kvartir",
+        title="Уборка квартир в Уфе (145 объявлений)",
+        description="Сколько стоит уборка квартиры в Уфе? Уборка квартиры стоит от 3000 рублей.",
+    ))
+    assert lead["status"] == "Отклонён"
