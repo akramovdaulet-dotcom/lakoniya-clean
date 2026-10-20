@@ -171,3 +171,43 @@ def test_no_url_is_rejected_without_fabricating_source_link():
     lead = classify_result(request(url=""))
     assert lead["status"] == "Отклонён"
     assert lead["url"] == "Не указано"
+
+
+def test_rejects_avito_service_ad_even_if_snippet_contains_request_words():
+    lead = classify_result(request(
+        url="https://www.avito.ru/ufa/predlozheniya_uslug/uborka_klining/item",
+        title="Генеральная уборка квартир и офисов в Уфе",
+        description="Нужна уборка дома? Выполним уборку, бесплатный выезд, закажите уборку.",
+    ))
+    assert lead["status"] == "Отклонён"
+    assert "Avito" in lead["rejection_reason"]
+
+
+def test_rejects_yandex_category_page():
+    lead = classify_result(request(
+        url="https://uslugi.yandex.ru/172-ufa/category?text=cleaning",
+        title="Уборка и помощь по хозяйству в Уфе",
+        description="Закажите уборку и убедитесь сами. Напишите нам, чтобы узнать стоимость.",
+    ))
+    assert lead["status"] == "Отклонён"
+    assert "Категория" in lead["rejection_reason"]
+
+
+def test_rejects_profi_provider_catalog_page():
+    lead = classify_result(request(
+        url="https://profi.ru/geo-ufa/domashnii_personal/uborka",
+        title="Профессиональная уборка в Уфе",
+        description="Прямо сейчас ищут уборку. Услуги клинеров и цены.",
+    ))
+    assert lead["status"] == "Отклонён"
+    assert "Каталог исполнителей" in lead["rejection_reason"]
+
+
+def test_vk_post_url_is_distinguished_from_community_profile():
+    profile = classify_result(request(url="https://vk.com/fedorclean74"))
+    post = classify_result(request(url="https://vk.com/wall-123456_789"))
+    assert profile["status"] == "Отклонён"
+    assert "страница сообщества" in profile["rejection_reason"].lower()
+    # The URL alone is not enough to confirm a lead; a real post still needs
+    # intent, locality and publication date evidence.
+    assert post["status"] == "Подтверждённый кандидат"
