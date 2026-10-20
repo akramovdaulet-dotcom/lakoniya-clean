@@ -11,7 +11,7 @@ cd backend
 python -m lead_finder.agent --limit 5
 ```
 
-Результат по умолчанию сохраняется в `backend/lead-finder-results.json`, история ссылок — в `backend/.lead-finder-seen.json`. Эти файлы локальные и не должны коммититься.
+Если запускать из папки `backend`, отчёт сохраняется в `lead-finder-results.json`, история ссылок — в `.lead-finder-seen.json`. Эти файлы локальные и не должны коммититься.
 
 Firecrawl Search API документирован здесь: https://docs.firecrawl.dev/features/search. API позволяет начать без ключа с ограничениями; для более высоких лимитов задайте переменную окружения `FIRECRAWL_API_KEY`. Ключ не помещайте в исходный код.
 
