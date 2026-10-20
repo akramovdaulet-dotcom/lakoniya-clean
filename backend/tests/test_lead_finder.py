@@ -93,3 +93,23 @@ def test_search_query_alone_does_not_make_competitor_page_a_lead():
         query='"ищу уборку" Уфа',
     )
     assert score_result(result) is None
+
+
+def test_rejects_local_request_without_ufa_evidence():
+    result = SearchResult(
+        title="Ищу человека для уборки в подъезде",
+        url="https://example.org/request",
+        description="Ищу человека для уборки один раз в месяц.",
+        query='"ищу человека для уборки" Уфа',
+    )
+    assert score_result(result) is None
+
+
+def test_rejects_street_snow_clearance_as_out_of_scope():
+    result = SearchResult(
+        title="В Уфе нужна уборка снега на улице",
+        url="https://example.org/community-post",
+        description="Нужна уборка снега и расчистка улицы.",
+        query='site:vk.com "нужна уборка" Уфа',
+    )
+    assert score_result(result) is None
