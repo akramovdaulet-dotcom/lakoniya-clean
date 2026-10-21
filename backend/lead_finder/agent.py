@@ -567,22 +567,24 @@ def render_digest(report: dict[str, Any]) -> str:
 
 
 def send_telegram(text: str, token: str | None = None, chat_id: str | None = None) -> None:
+    """Send `text` to one or several chats. `chat_id` may be a comma-separated list (e.g. both owners)."""
     token = (token or os.getenv("TELEGRAM_BOT_TOKEN", "")).strip()
-    chat_id = (chat_id or os.getenv("TELEGRAM_CHAT_ID", "")).strip()
-    if not token or not chat_id:
+    chat_ids = [c.strip() for c in (chat_id or os.getenv("TELEGRAM_CHAT_ID", "")).split(",") if c.strip()]
+    if not token or not chat_ids:
         raise RuntimeError("Для отправки в Telegram задайте TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID")
-    for chunk in split_for_telegram(text):
-        payload = json.dumps({"chat_id": chat_id, "text": chunk, "disable_web_page_preview": True}).encode()
-        request = Request(f"{TELEGRAM_ENDPOINT}/bot{token}/sendMessage", data=payload,
-                          headers={"Content-Type": "application/json"}, method="POST")
-        try:
-            with urlopen(request, timeout=15) as response:
-                body = json.loads(response.read().decode("utf-8"))
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
-            # Only the exception class: the message can contain the request URL with the bot token.
-            raise RuntimeError(f"Ошибка отправки Telegram: {type(exc).__name__}") from None
-        if not body.get("ok"):
-            raise RuntimeError("Telegram отклонил сообщение")
+    for target in chat_ids:
+        for chunk in split_for_telegram(text):
+            payload = json.dumps({"chat_id": target, "text": chunk, "disable_web_page_preview": True}).encode()
+            request = Request(f"{TELEGRAM_ENDPOINT}/bot{token}/sendMessage", data=payload,
+                              headers={"Content-Type": "application/json"}, method="POST")
+            try:
+                with urlopen(request, timeout=15) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+            except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+                # Only the exception class: the message can contain the request URL with the bot token.
+                raise RuntimeError(f"Ошибка отправки Telegram: {type(exc).__name__}") from None
+            if not body.get("ok"):
+                raise RuntimeError("Telegram отклонил сообщение")
 
 
 def main(argv: list[str] | None = None) -> int:

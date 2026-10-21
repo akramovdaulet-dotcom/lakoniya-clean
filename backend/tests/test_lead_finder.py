@@ -543,6 +543,25 @@ def test_telegram_token_is_never_in_error_text(monkeypatch):
     assert "SECRET-TOKEN" not in str(error.value)
 
 
+def test_send_telegram_goes_to_every_listed_chat(monkeypatch):
+    calls = []
+
+    class Reply:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b'{"ok": true}'
+
+    def fake_urlopen(request, timeout=0):
+        calls.append(json.loads(request.data.decode())["chat_id"])
+        return Reply()
+
+    monkeypatch.setattr(agent, "urlopen", fake_urlopen)
+    agent.send_telegram("text", token="T", chat_id=" 111 , 222,,")
+    assert calls == ["111", "222"]
+    with pytest.raises(RuntimeError):
+        agent.send_telegram("text", token="T", chat_id=" , ")
+
+
 # ------------------------------------------------------------- workflow
 
 
