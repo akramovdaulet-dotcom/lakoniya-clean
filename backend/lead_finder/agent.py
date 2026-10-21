@@ -12,7 +12,7 @@ import re
 import sys
 import time
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -67,6 +67,14 @@ NEGATIVE_TERMS = (
     "работаем 24/7", "избавляем мебель от строительной", "выгодные цены на услуги",
     "объявлений)", "145 объявлений", "60 уборщиков", "21 отзыв на",
 )
+MAX_CONFIRMED_IN_SUMMARY = 15
+MAX_REVIEW_IN_SUMMARY = 10
+EXCERPT_LIMIT = 300
+TELEGRAM_CHUNK = 3900
+RU_MONTHS = {
+    "января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
+    "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
+}
 TRACKING_KEYS = {"fbclid", "gclid", "yclid", "ref", "source", "utm_source", "utm_medium", "utm_campaign"}
 
 
@@ -117,6 +125,52 @@ def parse_date(value: str | None) -> date | None:
         except ValueError:
             continue
     return None
+
+
+def _safe_date(year: int, month: int, day: int) -> date | None:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def extract_date_from_text(text: str, today: date | None = None) -> date | None:
+    """Best-effort publication date from a search snippet: «сегодня», «вчера», «3 дня назад»,
+    «20 октября», «20.10.2026». The first mention in the text wins. Dates in the future are
+    ignored. This is a hint only: a snippet date never makes a candidate «Подтверждённый»."""
+    today = today or datetime.now(timezone.utc).date()
+    lowered = (text or "").lower().replace("ё", "е")
+    found: list[tuple[int, date]] = []
+
+    def add(match: re.Match, value: date | None) -> None:
+        if value is not None and value <= today:
+            found.append((match.start(), value))
+
+    for m in re.finditer(r"(?<![а-я])позавчера(?![а-я])", lowered):
+        add(m, today - timedelta(days=2))
+    for m in re.finditer(r"(?<![а-я])вчера(?![а-я])", lowered):
+        add(m, today - timedelta(days=1))
+    for m in re.finditer(r"(?<![а-я])сегодня(?![а-я])", lowered):
+        add(m, today)
+    for m in re.finditer(r"(?:(\d{1,3})\s+)?(?:минут[уы]?|час(?:а|ов)?)\s+назад", lowered):
+        add(m, today)
+    for m in re.finditer(r"(?:(\d{1,3})\s+)?(дн(?:я|ей|ь)|день|недел[юиь]|месяц(?:а|ев)?)\s+назад", lowered):
+        count = int(m.group(1) or 1)
+        unit = m.group(2)
+        days = count * (7 if unit.startswith("недел") else 30 if unit.startswith("месяц") else 1)
+        add(m, today - timedelta(days=days))
+    for m in re.finditer(r"(?<!\d)(\d{1,2})\s+(" + "|".join(RU_MONTHS) + r")(?:\s+(\d{4}))?(?![а-я])", lowered):
+        day, month = int(m.group(1)), RU_MONTHS[m.group(2)]
+        if m.group(3):
+            add(m, _safe_date(int(m.group(3)), month, day))
+        else:
+            value = _safe_date(today.year, month, day)
+            if value is not None and value > today:  # no year given: it was last year
+                value = _safe_date(today.year - 1, month, day)
+            add(m, value)
+    for m in re.finditer(r"(?<!\d)(\d{1,2})\.(\d{1,2})\.(\d{4})(?!\d)", lowered):
+        add(m, _safe_date(int(m.group(3)), int(m.group(2)), int(m.group(1))))
+    return min(found)[1] if found else None
 
 
 def service_type(text: str) -> str:
@@ -174,11 +228,18 @@ def classify_result(result: SearchResult, today: date | None = None) -> dict[str
         result.source_hint or "Неизвестно"
     )
     published = parse_date(result.published_at)
+    date_source = "api" if published else "none"
+    if published is None:
+        snippet_date = extract_date_from_text(f"{title} {excerpt}", today)
+        if snippet_date is not None:
+            published, date_source = snippet_date, "snippet"
     record: dict[str, Any] = {
         "title": title or "Не указано",
         "source": source,
         "url": url or "Не указано",
         "published_at": published.isoformat() if published else "Не указано",
+        # "api": the source gave the date; "snippet": guessed from the text; "none": unknown.
+        "date_source": date_source,
         "excerpt": excerpt[:1000] or "Не указано",
         "service_type": service_type(text),
         "area": "Уфа" if any(x in text for x in ("уфа", "уфе", "уфы", "уфу")) else "Не указано",
@@ -223,21 +284,24 @@ def classify_result(result: SearchResult, today: date | None = None) -> dict[str
             score += 10
         else:
             return reject("Публикация старше 90 дней; актуальность не подтверждена")
-    else:
-        score += 0
     score = min(score, 100)
     record["score"] = score
-    record["reason"] = "Явный запрос на уборку; указана Уфа" + (
-        "; дата публикации доступна" if published else "; дата публикации не найдена"
-    )
-    if score >= 80 and published is not None:
+    date_note = {
+        "api": "; дата публикации получена от источника",
+        "snippet": "; дата определена по фрагменту текста (не подтверждена источником)",
+        "none": "; дата публикации не найдена",
+    }[date_source]
+    record["reason"] = "Явный запрос на уборку; указана Уфа" + date_note
+    # Only a date delivered by the source itself can confirm a lead.
+    if score >= 80 and date_source == "api":
         record["status"] = "Подтверждённый кандидат"
     else:
         record["status"] = "Требует проверки"
-        record["rejection_reason"] = (
-            "Не удалось подтвердить дату публикации" if published is None
-            else "Недостаточная оценка для подтверждённого кандидата"
-        )
+        record["rejection_reason"] = {
+            "none": "Не удалось подтвердить дату публикации",
+            "snippet": "Дата определена по фрагменту, а не получена от источника: проверьте дату вручную",
+            "api": "Недостаточная оценка для подтверждённого кандидата",
+        }[date_source]
     return record
 
 
@@ -393,9 +457,94 @@ def save_seen(path: Path, urls: set[str]) -> None:
     path.write_text(json.dumps(sorted(urls), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def mark_previously_seen(report: dict[str, Any], seen: set[str]) -> None:
+    """Flag every candidate whose link was already in the seen-state. Run BEFORE building the summary."""
+    for key in ("confirmed_candidates", "needs_review", "rejected_candidates"):
+        for candidate in report[key]:
+            candidate["previously_seen"] = candidate["url"] in seen
+
+
+def new_candidates(report: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    fresh = [c for c in report[key] if not c.get("previously_seen")]
+    return sorted(fresh, key=lambda c: (c["score"], c["published_at"] if c["published_at"] != "Не указано" else ""), reverse=True)
+
+
+def _one_line(text: str, limit: int) -> str:
+    text = re.sub(r"\s+", " ", text or "").strip()
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _lead_block(index: int, lead: dict[str, Any]) -> str:
+    date_text = lead["published_at"]
+    if lead.get("date_source") == "snippet":
+        date_text += " (по фрагменту)"
+    elif date_text == "Не указано":
+        date_text = "дата не найдена"
+    return "\n".join([
+        f"{index}. {_one_line(lead['title'], 200)}",
+        f"{lead['source']} · {date_text} · {lead['score']}/100",
+        _one_line(lead["excerpt"], EXCERPT_LIMIT),
+        lead["url"],
+    ])
+
+
+def render_owner_summary(report: dict[str, Any]) -> str | None:
+    """Telegram text for the owner, or None when nothing NEW needs attention.
+
+    Only candidates not seen before: up to 15 confirmed and up to 10 «needs review».
+    Rejected candidates are never sent."""
+    confirmed = new_candidates(report, "confirmed_candidates")
+    review = new_candidates(report, "needs_review")
+    if not confirmed and not review:
+        return None
+    parts = [
+        "\n".join([
+            "Лакония Клин · новые публичные заявки на уборку в Уфе",
+            f"Новых подтверждённых: {len(confirmed)}; новых на проверку: {len(review)}",
+            "Это результаты поиска, сами страницы не открывались. Откройте ссылку и проверьте, что запрос актуален, до любых действий.",
+        ])
+    ]
+    for title, items, limit in (
+        ("ПОДТВЕРЖДЁННЫЕ", confirmed, MAX_CONFIRMED_IN_SUMMARY),
+        ("НА ПРОВЕРКУ", review, MAX_REVIEW_IN_SUMMARY),
+    ):
+        if not items:
+            continue
+        parts.append(f"{title} ({len(items)})")
+        parts.extend(_lead_block(i, lead) for i, lead in enumerate(items[:limit], 1))
+        if len(items) > limit:
+            parts.append(f"…и ещё {len(items) - limit} (полный список в JSON-отчёте)")
+    return "\n\n".join(parts)
+
+
+def split_for_telegram(text: str, limit: int = TELEGRAM_CHUNK) -> list[str]:
+    """Split on blank lines so a candidate is not cut in half; hard-split only oversize blocks."""
+    chunks: list[str] = []
+    current = ""
+    for block in text.split("\n\n"):
+        while len(block) > limit:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(block[:limit])
+            block = block[limit:]
+        candidate = f"{current}\n\n{block}" if current else block
+        if len(candidate) > limit:
+            chunks.append(current)
+            current = block
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks or [text]
+
+
 def render_digest(report: dict[str, Any]) -> str:
+    """Run log for the console / Actions: counts and honesty notes, not the owner message."""
     summary = report["summary"]
     confirmed = report["confirmed_candidates"]
+    new_confirmed = [c for c in confirmed if not c.get("previously_seen")]
+    new_review = [c for c in report["needs_review"] if not c.get("previously_seen")]
     lines = [
         "Лакония Клин · поиск публичных заявок в Уфе",
         f"Источников в поиске: {summary['sources_attempted']}; запросы API успешны: {summary['sources_with_successful_queries']}",
@@ -403,6 +552,7 @@ def render_digest(report: dict[str, Any]) -> str:
         "Прямое открытие страниц-источников: не выполнялось",
         f"Получено результатов: {summary['candidate_results_received']}; уникальных кандидатов: {summary['unique_candidates']}",
         f"Подтверждено: {summary['confirmed_candidates']}; требуют проверки: {summary['needs_review']}; отклонено: {summary['rejected']}",
+        f"Из них новых (не виденных ранее): подтверждённых {len(new_confirmed)}, на проверку {len(new_review)}",
         f"Удалено дублей: {summary['duplicates_removed']}",
     ]
     if summary["sources_unavailable_or_failed"]:
@@ -411,8 +561,8 @@ def render_digest(report: dict[str, Any]) -> str:
         lines.append("Подтверждённых кандидатов нет. Результаты с неизвестной датой оставлены на ручную проверку.")
         return "\n".join(lines)
     lines.append("")
-    for i, lead in enumerate(confirmed[:15], 1):
-        lines.extend([f"{i}. {lead['title']}", f"{lead['source']} · {lead['published_at']} · {lead['score']}/100", lead["excerpt"][:300], lead["url"], ""])
+    for i, lead in enumerate(confirmed[:MAX_CONFIRMED_IN_SUMMARY], 1):
+        lines.extend([_lead_block(i, lead), ""])
     return "\n".join(lines).strip()
 
 
@@ -421,8 +571,7 @@ def send_telegram(text: str, token: str | None = None, chat_id: str | None = Non
     chat_id = (chat_id or os.getenv("TELEGRAM_CHAT_ID", "")).strip()
     if not token or not chat_id:
         raise RuntimeError("Для отправки в Telegram задайте TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID")
-    chunks = [text[i:i + 3900] for i in range(0, len(text), 3900)] or [text]
-    for chunk in chunks:
+    for chunk in split_for_telegram(text):
         payload = json.dumps({"chat_id": chat_id, "text": chunk, "disable_web_page_preview": True}).encode()
         request = Request(f"{TELEGRAM_ENDPOINT}/bot{token}/sendMessage", data=payload,
                           headers={"Content-Type": "application/json"}, method="POST")
@@ -430,6 +579,7 @@ def send_telegram(text: str, token: str | None = None, chat_id: str | None = Non
             with urlopen(request, timeout=15) as response:
                 body = json.loads(response.read().decode("utf-8"))
         except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+            # Only the exception class: the message can contain the request URL with the bot token.
             raise RuntimeError(f"Ошибка отправки Telegram: {type(exc).__name__}") from None
         if not body.get("ok"):
             raise RuntimeError("Telegram отклонил сообщение")
@@ -446,29 +596,30 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--limit должен быть от 1 до 10")
     report = run_search(FirecrawlSearch(), limit_per_query=args.limit)
     seen = load_seen(args.state)
+    # 1) mark what was seen before, 2) only then build the owner summary.
+    mark_previously_seen(report, seen)
     all_candidates = report["confirmed_candidates"] + report["needs_review"] + report["rejected_candidates"]
-    for candidate in all_candidates:
-        if candidate["url"] in seen:
-            candidate["previously_seen"] = True
-        else:
-            candidate["previously_seen"] = False
-    # Do not send empty/no-new-lead reports as customer notifications. Owner-only
-    # summary is optional and explicitly requested with --telegram.
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    save_seen(args.state, seen | {c["url"] for c in all_candidates if c["url"] != "Не указано"})
-    digest = render_digest(report)
-    print(digest)
+    print(render_digest(report))
     print(f"\nJSON-отчёт: {args.output}")
-    if args.telegram and report["confirmed_candidates"]:
-        try:
-            send_telegram(digest)
-        except RuntimeError as exc:
-            print(str(exc), file=sys.stderr)
-            return 3
-        print("Сводка отправлена владельцу. Сообщения потенциальным клиентам не отправлялись.")
-    elif args.telegram:
-        print("Telegram не отправлен: нет подтверждённых кандидатов.")
+    if report["summary"]["sources_with_successful_queries"] == 0:
+        # Do not pretend «no leads»: every search call failed (bad key, quota, outage).
+        print("Ни один поисковый запрос не выполнен успешно: проверьте FIRECRAWL_API_KEY и лимиты.", file=sys.stderr)
+        return 4
+    if args.telegram:
+        summary_text = render_owner_summary(report)
+        if summary_text is None:
+            print("Telegram не отправлен: новых кандидатов нет.")
+        else:
+            try:
+                send_telegram(summary_text)
+            except RuntimeError as exc:
+                # The state is not saved, so the same candidates are sent again on the next run.
+                print(str(exc), file=sys.stderr)
+                return 3
+            print("Сводка отправлена владельцу. Сообщения потенциальным клиентам не отправлялись.")
+    save_seen(args.state, seen | {c["url"] for c in all_candidates if c["url"] != "Не указано"})
     return 0
 
 
