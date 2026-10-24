@@ -3,25 +3,7 @@ name: Find Ufa cleaning leads
 # Расписание (cron) GitHub запускает только для workflow из основной ветки (main).
 # На pull_request выполняется ТОЛЬКО job test: реальный поиск на PR не запускается.
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - "backend/lead_finder/**"
-      - "backend/tests/test_lead_finder.py"
-      - ".github/workflows/lead-finder.yml"
-  schedule:
-    - cron: "0 4 * * *" # 04:00 UTC = 09:00 по Уфе (UTC+5)
   workflow_dispatch:
-    inputs:
-      limit:
-        description: "Результатов на один поисковый запрос"
-        required: true
-        type: choice
-        default: "5"
-        options:
-          - "3"
-          - "5"
-          - "8"
 
 permissions:
   contents: read
