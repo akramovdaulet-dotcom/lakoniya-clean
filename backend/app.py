@@ -149,6 +149,11 @@ def initialize_db():
         add_column_if_missing(db, "requests", "dirty_area_photo_count", "INTEGER NOT NULL DEFAULT 0")
         # Secret of the customer's status link (site requests only; the customer has no Telegram chat).
         add_column_if_missing(db, "requests", "status_token", "TEXT")
+        # Owner-only CRM fields; nullable/defaulted to preserve existing requests.
+        add_column_if_missing(db, "requests", "owner_notes", "TEXT NOT NULL DEFAULT ''")
+        add_column_if_missing(db, "requests", "scheduled_at", "TEXT")
+        add_column_if_missing(db, "requests", "actual_amount", "BIGINT")
+        add_column_if_missing(db, "requests", "expenses_amount", "BIGINT")
 
 
 def add_column_if_missing(db, table: str, column: str, column_type: str) -> None:
@@ -543,6 +548,45 @@ def client_ip(request) -> str:
 
 class StatusUpdate(BaseModel):
     status: str
+
+
+class ManualRequestCreate(BaseModel):
+    """A lead entered by the owner. It never triggers customer notifications."""
+    service: str = Field(min_length=2, max_length=100)
+    address: str = Field(min_length=2, max_length=300)
+    preferred_time: str = Field(default="Не согласовано", max_length=100)
+    customer_contact: str = Field(min_length=2, max_length=200)
+    notes: str = Field(default="", max_length=1000)
+    source: str = Field(default="manual", max_length=40)
+    estimated_amount: int | None = Field(default=None, ge=0, le=100000000)
+
+    @field_validator("service", "address", "preferred_time", "customer_contact", "notes", "source", mode="before")
+    @classmethod
+    def _collapse_text(cls, value):
+        return collapse_spaces(value) if isinstance(value, str) else value
+
+
+class OwnerRequestUpdate(BaseModel):
+    owner_notes: str | None = Field(default=None, max_length=2000)
+    scheduled_at: str | None = Field(default=None, max_length=40)
+    actual_amount: int | None = Field(default=None, ge=0, le=100000000)
+    expenses_amount: int | None = Field(default=None, ge=0, le=100000000)
+
+    @field_validator("owner_notes", mode="before")
+    @classmethod
+    def _collapse_owner_notes(cls, value):
+        return collapse_spaces(value) if isinstance(value, str) else value
+
+    @field_validator("scheduled_at")
+    @classmethod
+    def _validate_schedule(cls, value):
+        if value in (None, ""):
+            return None
+        try:
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError("scheduled_at must be an ISO date or datetime") from None
+        return value
 
 
 NOTIFY_OWNERS = os.environ.get("NOTIFY_OWNERS", "true").strip().lower() != "false"
@@ -942,16 +986,112 @@ def create_synthetic_test_request(
 
 
 @app.get("/api/requests")
-def list_requests(_: dict = Depends(owner_user)):
+def list_requests(
+    status: str | None = None,
+    q: str = "",
+    _: dict = Depends(owner_user),
+):
+    clauses, params = [], []
+    if status and status in ALLOWED_STATUSES:
+        clauses.append("status = ?")
+        params.append(status)
+    if q.strip():
+        pattern = "%" + q.strip()[:100] + "%"
+        clauses.append("(service LIKE ? OR address LIKE ? OR customer_contact LIKE ? OR CAST(id AS TEXT) LIKE ?)")
+        params.extend([pattern, pattern, pattern, pattern])
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     with connect_db() as db:
         rows = execute_db(
             db,
             """SELECT id, service, address, preferred_time, customer_contact,
                       notes, status, created_at, estimated_amount, source,
-                      dirty_area_photo_count
-               FROM requests ORDER BY created_at DESC LIMIT 500"""
+                      dirty_area_photo_count, owner_notes, scheduled_at,
+                      actual_amount, expenses_amount
+               FROM requests""" + where + " ORDER BY created_at DESC LIMIT 500",
+            params,
         ).fetchall()
     return {"requests": [dict(row) for row in rows]}
+
+
+@app.get("/api/crm/summary")
+def crm_summary(_: dict = Depends(owner_user)):
+    now = datetime.now(timezone.utc)
+    month_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+    with connect_db() as db:
+        rows = execute_db(
+            db,
+            "SELECT status, created_at, estimated_amount, actual_amount, expenses_amount FROM requests"
+        ).fetchall()
+    total = len(rows)
+    new_count = sum(row["status"] == "Новая" for row in rows)
+    active_count = sum(row["status"] in {"В обработке", "Передана сотруднику", "Подтверждена", "В работе"} for row in rows)
+    completed_count = sum(row["status"] == "Завершена" for row in rows)
+    month_rows = []
+    for row in rows:
+        try:
+            created = datetime.fromtimestamp(int(row["created_at"]), tz=timezone.utc)
+        except (TypeError, ValueError, OSError):
+            continue
+        if created >= month_start:
+            month_rows.append(row)
+    revenue = sum(int(row["actual_amount"] if row["actual_amount"] is not None else (row["estimated_amount"] or 0)) for row in month_rows if row["status"] == "Завершена")
+    expenses = sum(int(row["expenses_amount"] or 0) for row in month_rows if row["status"] == "Завершена")
+    return {
+        "total": total,
+        "new": new_count,
+        "active": active_count,
+        "completed": completed_count,
+        "month_completed": sum(row["status"] == "Завершена" for row in month_rows),
+        "month_revenue": revenue,
+        "month_expenses": expenses,
+        "month_profit": revenue - expenses,
+        "currency": "RUB",
+    }
+
+
+@app.post("/api/requests/manual", status_code=201)
+def create_manual_request(payload: ManualRequestCreate, _: dict = Depends(owner_user)):
+    """Owner-only manual lead entry. Never contacts the lead or sends customer notifications."""
+    now = int(time.time())
+    with connect_db() as db:
+        request_id = execute_db(
+            db,
+            """INSERT INTO requests
+               (service, address, preferred_time, customer_contact, notes, status,
+                created_at, customer_telegram_id, estimated_amount, source, owner_notes,
+                scheduled_at, actual_amount, expenses_amount)
+               VALUES (?, ?, ?, ?, ?, 'Новая', ?, NULL, ?, ?, '', NULL, NULL, NULL)""",
+            (payload.service, payload.address, payload.preferred_time, payload.customer_contact,
+             payload.notes, now, payload.estimated_amount, payload.source or "manual"),
+            returning_id=True,
+        )
+    return {"id": request_id, "status": "Новая", "source": payload.source or "manual"}
+
+
+@app.patch("/api/requests/{request_id}/crm")
+def update_request_crm(
+    request_id: int,
+    payload: OwnerRequestUpdate,
+    _: dict = Depends(owner_user),
+):
+    fields = payload.model_fields_set
+    allowed = {
+        "owner_notes": payload.owner_notes,
+        "scheduled_at": payload.scheduled_at or None,
+        "actual_amount": payload.actual_amount,
+        "expenses_amount": payload.expenses_amount,
+    }
+    updates = [(name, allowed[name]) for name in fields if name in allowed]
+    if not updates:
+        raise HTTPException(status_code=422, detail="No CRM fields supplied")
+    with connect_db() as db:
+        exists = execute_db(db, "SELECT id FROM requests WHERE id = ?", (request_id,)).fetchone()
+        if exists is None:
+            raise HTTPException(status_code=404, detail="Request not found")
+        assignments = ", ".join(name + " = ?" for name, _ in updates)
+        execute_db(db, "UPDATE requests SET " + assignments + " WHERE id = ?",
+                   [value for _, value in updates] + [request_id])
+    return {"id": request_id, "updated": [name for name, _ in updates]}
 
 
 @app.patch("/api/requests/{request_id}/status")
